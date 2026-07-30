@@ -82,10 +82,13 @@ H.264 e não AV1/HEVC: é o único com encoder por hardware universalmente
 presente. AV1 é melhor, mas exclui toda máquina anterior a ~2021 — inaceitável
 num produto cujo cliente instala na máquina alheia.
 
-> **Máquina de desenvolvimento atual: Intel HD Graphics 4600 (Haswell, 2013).**
-> Tem Quick Sync H.264, não tem HEVC nem AV1. Tratar como **piso de
-> compatibilidade**: se ficar fluido nela, roda em qualquer lugar. Não usar
-> para medir o teto de qualidade.
+> **Máquina de desenvolvimento atual: Intel HD Graphics 4600 (Haswell, 2013),
+> monitor 1360×768 nativo.** Tem Quick Sync H.264, não tem HEVC nem AV1.
+> Tratar como **piso de compatibilidade**: se ficar fluido nela, roda em
+> qualquer lugar. Não usar para medir o teto de qualidade.
+>
+> A resolução do monitor não permite validar 1080p ponta a ponta. Encode é
+> testado com frame sintético — ver a seção de restrição em `SPRINT-0.md`.
 
 ### D4 — Transporte atrás de uma abstração, desde a primeira linha
 

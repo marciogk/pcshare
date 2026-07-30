@@ -42,15 +42,45 @@ Deliberadamente fora de escopo — incluir qualquer um destes atrasa a resposta
 
 ---
 
+## Restrição da máquina de desenvolvimento
+
+O monitor de desenvolvimento é **1360×768** (resolução nativa, confirmada) e a
+GPU é uma Intel HD Graphics 4600. Isso impede medir a pipeline completa em
+1080p no hardware disponível.
+
+A solução **não** é baixar a meta. É separar as duas perguntas:
+
+| Pergunta | Depende do monitor? | Como medir aqui |
+|---|---|---|
+| A captura acompanha a tela? | sim | resolução nativa — **já validado**: 60 fps, 0 frames perdidos |
+| O encoder aguenta 1080p30? | **não** | alimentar o encoder com textura sintética de 1920×1080 |
+| A latência fecha em 80 ms? | parcialmente | medir na nativa; extrapolar com o custo medido do encoder |
+
+Codificar não se importa com o que está no monitor. Um teste de encoder com
+frame sintético de 1080p é uma medição **legítima** de 1080p — e isola melhor
+a variável do que capturar uma tela real.
+
+Se for necessário validar ponta a ponta em 1080p nesta máquina, a saída é um
+**driver de display virtual** (IddCx). Vale o esforço porque não é só bancada
+de teste: suporte a *host headless* — máquina sem monitor físico — é recurso
+de produto, e display virtual é como a concorrência resolve isso.
+
 ## Critério de saída (mensurável)
 
 | Métrica | Alvo | Como medir |
 |---|---|---|
-| Taxa de quadros | ≥ 30 fps a 1920×1080 | contador no viewer |
-| Latência glass-to-glass | < 80 ms na LAN | ver protocolo abaixo |
-| CPU no host | < 15% de um core moderno | Gerenciador de Tarefas |
+| Captura | ≥ 30 fps na resolução nativa, sem frames perdidos | ✅ atingido (60 fps, 0 perdidos) |
+| Encode | 1080p30 em tempo real, < 33 ms/frame | frame sintético 1920×1080 |
+| Latência glass-to-glass | < 80 ms na LAN, resolução nativa | ver protocolo abaixo |
+| CPU no host | < 15% de um core | Gerenciador de Tarefas |
 | Banda, tela parada | < 100 kbps | contador de bytes no transporte |
 | Banda, vídeo em tela cheia | < 8 Mbps | contador de bytes no transporte |
+
+> **Achado da etapa 1 que altera o design:** com o desktop ocioso, a captura
+> registrou **zero timeouts** — algo redesenha 60 vezes por segundo, ainda que
+> numa área ínfima (0,3% da tela). A suposição "tela parada, banda zero" não se
+> confirma. A supressão de envio precisa ser decidida por **área alterada**, e
+> não pela ausência de frame novo.
 
 ### Como medir latência glass-to-glass corretamente
 
