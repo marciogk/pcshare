@@ -10,8 +10,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "pcshare-core"
+name = "pcshare-codec"
 version = "0.0.1"
+dependencies = [
+ "windows",
+]
 
 [[package]]
 name = "proc-macro2"
