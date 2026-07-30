@@ -21,7 +21,10 @@ pub use decoder::{DecodedFrame, H264Decoder};
 
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
-use std::sync::Once;
+use std::sync::{Arc, Once};
+
+use pcshare_gpu::GpuContext;
+use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree};
@@ -73,6 +76,7 @@ pub struct H264Encoder {
     ready: Vec<Packet>,
     tuning: Vec<&'static str>,
     force_keyframe: bool,
+    gpu_direct: bool,
 }
 
 impl H264Encoder {
@@ -91,6 +95,24 @@ impl H264Encoder {
         }
     }
 
+    /// Encoder ligado a um dispositivo D3D11, aceitando texturas via
+    /// [`Self::submit_texture`].
+    ///
+    /// Cai para o caminho por memória de sistema se o MFT não for capaz de
+    /// D3D11 — o que acontece com o encoder de software e com drivers
+    /// antigos. Verifique com [`Self::is_gpu_direct`] antes de mandar
+    /// texturas.
+    pub fn with_gpu(
+        gpu: &Arc<GpuContext>,
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate: u32,
+    ) -> Result<Self> {
+        ensure_mf_started();
+        Self::build(width, height, fps, bitrate, Backend::Hardware, Some(gpu))
+    }
+
     pub fn with_backend(
         width: u32,
         height: u32,
@@ -99,6 +121,22 @@ impl H264Encoder {
         backend: Backend,
     ) -> Result<Self> {
         ensure_mf_started();
+        Self::build(width, height, fps, bitrate, backend, None)
+    }
+
+    /// `true` se o encoder aceita texturas D3D11 diretamente.
+    pub fn is_gpu_direct(&self) -> bool {
+        self.gpu_direct
+    }
+
+    fn build(
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate: u32,
+        backend: Backend,
+        gpu: Option<&Arc<GpuContext>>,
+    ) -> Result<Self> {
         unsafe {
             let (transform, name) = find_encoder(backend)?;
 
@@ -112,6 +150,24 @@ impl H264Encoder {
             // a latência importa mais do que os poucos % de taxa de compressão
             // que os B-frames trariam.
             let _ = attrs.SetUINT32(&MF_LOW_LATENCY, 1);
+
+            // O gerenciador D3D precisa chegar **antes** dos tipos de mídia:
+            // é ele que faz o MFT passar a aceitar superfícies de vídeo em vez
+            // de buffers de memória de sistema.
+            let mut gpu_direct = false;
+            if let Some(gpu) = gpu
+                && attrs.GetUINT32(&MF_SA_D3D11_AWARE).unwrap_or(0) == 1
+            {
+                let mut token = 0u32;
+                let mut manager: Option<IMFDXGIDeviceManager> = None;
+                MFCreateDXGIDeviceManager(&mut token, &mut manager)?;
+                let manager = manager.expect("MFCreateDXGIDeviceManager sem manager");
+                manager.ResetDevice(gpu.device(), token)?;
+
+                transform
+                    .ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, manager.as_raw() as usize)?;
+                gpu_direct = true;
+            }
 
             // Encoders exigem o tipo de saída definido antes do de entrada.
             let out_type = MFCreateMediaType()?;
@@ -167,6 +223,7 @@ impl H264Encoder {
                 // O primeiro frame precisa ser keyframe: sem ele o
                 // decodificador não tem por onde começar.
                 force_keyframe: true,
+                gpu_direct,
             })
         }
     }
@@ -208,21 +265,46 @@ impl H264Encoder {
     /// pipeline. Use [`Self::take_packets`] para coletar o que já ficou pronto.
     pub fn submit(&mut self, nv12: &[u8]) -> Result<()> {
         debug_assert_eq!(nv12.len(), self.nv12_len(), "buffer NV12 com tamanho errado");
-        unsafe {
-            if self.force_keyframe {
+        let (time, duration) = self.next_timestamp();
+        let sample = unsafe { make_sample(nv12, time, duration)? };
+        self.push(sample)
+    }
+
+    /// Envia um frame que já está na GPU, sem cópia para a memória de sistema.
+    ///
+    /// `tex` precisa ser NV12 e pertencer ao **mesmo dispositivo D3D11** que
+    /// foi passado em [`Self::with_gpu`]. Só funciona se o encoder tiver sido
+    /// criado por lá — verificável em [`Self::is_gpu_direct`].
+    pub fn submit_texture(&mut self, tex: &ID3D11Texture2D) -> Result<()> {
+        debug_assert!(
+            self.is_gpu_direct(),
+            "submit_texture exige encoder criado com with_gpu"
+        );
+        let (time, duration) = self.next_timestamp();
+        let sample = unsafe { make_texture_sample(tex, time, duration)? };
+        self.push(sample)
+    }
+
+    /// Marca de tempo e duração do próximo frame, aplicando o pedido de
+    /// keyframe pendente.
+    fn next_timestamp(&mut self) -> (i64, i64) {
+        if self.force_keyframe {
+            unsafe {
                 if let Ok(codec) = self.transform.cast::<ICodecAPI>() {
-                    let _ = codec
-                        .SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &VARIANT::from(1u32));
+                    let _ =
+                        codec.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &VARIANT::from(1u32));
                 }
-                self.force_keyframe = false;
             }
+            self.force_keyframe = false;
+        }
+        let duration = 10_000_000i64 / self.fps as i64;
+        let time = self.frame_index * duration;
+        self.frame_index += 1;
+        (time, duration)
+    }
 
-            let duration = 10_000_000i64 / self.fps as i64;
-            let time = self.frame_index * duration;
-            self.frame_index += 1;
-
-            let sample = make_sample(nv12, time, duration)?;
-
+    fn push(&mut self, sample: IMFSample) -> Result<()> {
+        unsafe {
             if self.events.is_some() {
                 self.pump_until_need_input()?;
                 self.transform.ProcessInput(0, &sample, 0)?;
@@ -439,6 +521,33 @@ unsafe fn tune_rate_control(transform: &IMFTransform, fps: u32) -> Vec<&'static 
             applied.push("nenhum ajuste aceito");
         }
         applied
+    }
+}
+
+/// Embrulha uma textura D3D11 num `IMFSample` sem copiar pixel algum.
+///
+/// É este ponto que elimina o desvio pela CPU: o encoder recebe uma
+/// referência à superfície que já está na memória de vídeo.
+unsafe fn make_texture_sample(
+    tex: &ID3D11Texture2D,
+    time: i64,
+    duration: i64,
+) -> Result<IMFSample> {
+    unsafe {
+        let buffer = MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, tex, 0, false)?;
+
+        // O buffer nasce com comprimento zero; sem declarar o tamanho útil o
+        // encoder trata o frame como vazio.
+        if let Ok(two_d) = buffer.cast::<IMF2DBuffer>() {
+            let len = two_d.GetContiguousLength()?;
+            buffer.SetCurrentLength(len)?;
+        }
+
+        let sample = MFCreateSample()?;
+        sample.AddBuffer(&buffer)?;
+        sample.SetSampleTime(time)?;
+        sample.SetSampleDuration(duration)?;
+        Ok(sample)
     }
 }
 

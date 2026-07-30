@@ -73,7 +73,7 @@ inteira a 30 fps é desperdiçar 95% da banda e do CPU.
 **Descartado:** `mss`, GDI `BitBlt`, screenshots. Não expõem dirty rects,
 copiam da GPU para a CPU a cada frame, e ensinam o padrão errado.
 
-### D3 — Encode H.264 por hardware (Media Foundation)
+### D3 — Encode H.264 por hardware, sem sair da GPU  ✅ IMPLEMENTADO
 
 Quick Sync / NVENC / AMF conforme a GPU disponível, com fallback para encoder
 por software (openh264) quando não houver hardware.
@@ -89,6 +89,39 @@ num produto cujo cliente instala na máquina alheia.
 >
 > A resolução do monitor não permite validar 1080p ponta a ponta. Encode é
 > testado com frame sintético — ver a seção de restrição em `SPRINT-0.md`.
+
+**Caminho de pixels, implementado na Fase 1.** A textura nunca sai da memória
+de vídeo: a Desktop Duplication entrega BGRA na GPU, o processador de vídeo do
+D3D11 converte para NV12 ali mesmo, e a textura resultante vai ao encoder
+embrulhada num `IMFSample` via `MFCreateDXGISurfaceBuffer`.
+
+Exige que captura, conversor e encoder **compartilhem um único dispositivo
+D3D11** — texturas não atravessam dispositivos. Daí o crate `pcshare-gpu`
+existir separado dos outros dois. O dispositivo precisa de
+`D3D11_CREATE_DEVICE_VIDEO_SUPPORT` e de proteção multithread: o Media
+Foundation chama o encoder das próprias threads, e sem a proteção o dispositivo
+corrompe em silêncio.
+
+Medido a 1360×768, custo total por quadro no host:
+
+| | leitura GPU | conversão | encode | total |
+|---|---|---|---|---|
+| memória de sistema | 5,37 ms | 2,06 ms | 4,29 ms | **11,72 ms** |
+| GPU direto | — | 0,08 ms | 3,57 ms | **3,65 ms** |
+
+3,2× mais rápido. O encode também caiu porque o encoder deixou de precisar
+subir o quadro para a GPU.
+
+> A conversão aparecer como 0,08 ms **não** significa que a GPU fez o trabalho
+> nesse tempo: `VideoProcessorBlt` é assíncrono e apenas enfileira. O custo real
+> aparece dentro do encode, que espera. Só o total de 3,65 ms tem significado; a
+> divisão entre as duas colunas, não.
+
+O caminho por memória de sistema continua no código como referência de
+comparação (`--cpu-path`) e como plano B: encoders de software e drivers
+antigos não aceitam texturas, e `H264Encoder::is_gpu_direct` decide qual usar.
+
+### D3 (histórico) — por que H.264 e não AV1
 
 ### D4 — Transporte atrás de uma abstração, desde a primeira linha
 

@@ -5,12 +5,10 @@
 //! o frame anterior. Numa tela de escritório parada quase nenhum pixel muda,
 //! e codificar a tela inteira a 30 fps desperdiça banda e CPU.
 
-use windows::Win32::Foundation::{HMODULE, RECT};
-use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
+use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ,
-    D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+    D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_STAGING, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{
@@ -18,6 +16,10 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_OUTDUPL_MOVE_RECT, IDXGIDevice, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
 };
 use windows::core::Interface;
+
+use std::sync::Arc;
+
+pub use pcshare_gpu::GpuContext;
 
 #[derive(Debug)]
 pub enum CaptureError {
@@ -85,6 +87,10 @@ impl FrameStats {
 }
 
 pub struct DesktopCapture {
+    /// Dispositivo compartilhado com o conversor e o encoder. Texturas não
+    /// atravessam dispositivos D3D11 diferentes sem compartilhamento
+    /// explícito, então o caminho sem cópia depende de todos usarem este.
+    gpu: Arc<GpuContext>,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     duplication: IDXGIOutputDuplication,
@@ -102,34 +108,25 @@ pub struct DesktopCapture {
 }
 
 impl DesktopCapture {
-    /// Abre a duplicação da saída de vídeo `output_index` (0 = monitor primário).
+    /// Abre a duplicação da saída de vídeo `output_index` (0 = monitor
+    /// primário), criando um dispositivo D3D11 próprio.
+    ///
+    /// Use [`Self::with_gpu`] quando a textura for seguir para o encoder sem
+    /// passar pela CPU: nesse caso todos precisam do mesmo dispositivo.
     pub fn new(output_index: u32) -> Result<Self, CaptureError> {
+        Self::with_gpu(GpuContext::new()?, output_index)
+    }
+
+    /// Idem, sobre um dispositivo D3D11 já existente.
+    pub fn with_gpu(gpu: Arc<GpuContext>, output_index: u32) -> Result<Self, CaptureError> {
         unsafe {
-            let mut device: Option<ID3D11Device> = None;
-            let mut context: Option<ID3D11DeviceContext> = None;
-
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                // Só usado com D3D_DRIVER_TYPE_SOFTWARE.
-                HMODULE::default(),
-                // BGRA_SUPPORT é exigido para interoperar com Direct2D e é o
-                // formato que a Desktop Duplication entrega.
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                Some(&[D3D_FEATURE_LEVEL_11_0]),
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )?;
-
-            let device = device.expect("D3D11CreateDevice retornou Ok sem device");
-            let context = context.expect("D3D11CreateDevice retornou Ok sem context");
-
+            let device = gpu.device().clone();
+            let context = gpu.context().clone();
             let duplication = Self::duplicate_output(&device, output_index)?;
             let desc = duplication.GetDesc();
 
             Ok(Self {
+                gpu,
                 device,
                 context,
                 duplication,
@@ -231,6 +228,19 @@ impl DesktopCapture {
                 mouse_only,
             }))
         }
+    }
+
+    pub fn gpu(&self) -> &Arc<GpuContext> {
+        &self.gpu
+    }
+
+    /// A textura BGRA do frame retido, ainda na GPU.
+    ///
+    /// Este é o caminho sem cópia: entregue-a ao conversor NV12 e daí ao
+    /// encoder, sem que nenhum pixel passe pela CPU. Compare com
+    /// [`Self::copy_bgra`], que é o desvio caro.
+    pub fn current_texture(&self) -> Option<&ID3D11Texture2D> {
+        self.current.as_ref()
     }
 
     /// Copia o frame retido para `out` em BGRA, uma linha por `width()*4`

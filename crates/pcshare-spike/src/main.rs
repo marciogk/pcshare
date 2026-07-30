@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use pcshare_capture::{CaptureError, DesktopCapture};
+use pcshare_gpu::GpuContext;
 use pcshare_codec::convert::{bgra_to_nv12, nv12_to_bgra};
 use pcshare_codec::{H264Decoder, H264Encoder};
 use pcshare_core::{Channel, InputEvent, Message, TcpTransport, Transport};
@@ -114,12 +115,37 @@ fn run_loopback() {
 // ---------------------------------------------------------------- host
 
 fn run_host(mut t: TcpTransport) -> Result<(), Box<dyn std::error::Error>> {
-    let mut cap = DesktopCapture::new(0)?;
+    // `--cpu-path` força o caminho antigo (leitura da GPU + conversão na CPU),
+    // para comparação A/B com o caminho sem cópia.
+    let force_cpu = std::env::args().any(|a| a == "--cpu-path");
+
+    let gpu = GpuContext::new()?;
+    let mut cap = DesktopCapture::with_gpu(gpu.clone(), 0)?;
     let (w, h) = (cap.width(), cap.height());
     println!("host: capturando {w}x{h}");
 
-    let mut enc = H264Encoder::new(w, h, FPS, BITRATE)?;
+    let mut enc = if force_cpu {
+        H264Encoder::new(w, h, FPS, BITRATE)?
+    } else {
+        H264Encoder::with_gpu(&gpu, w, h, FPS, BITRATE)?
+    };
     println!("host: encoder [{}] ({})", enc.name(), enc.tuning().join(", "));
+
+    // O conversor na GPU só entra se o encoder aceitar texturas. Encoder de
+    // software e driver antigo caem no caminho por memória de sistema, e é
+    // melhor perder desempenho do que não funcionar.
+    let mut conv = match enc.is_gpu_direct() {
+        true => Some(pcshare_gpu::Nv12Converter::new(gpu.clone(), w, h)?),
+        false => None,
+    };
+    println!(
+        "host: caminho de pixels = {}",
+        if conv.is_some() {
+            "GPU direto (sem cópia)"
+        } else {
+            "memória de sistema (leitura da GPU + conversão na CPU)"
+        }
+    );
 
     let hello = Message::Hello {
         width: w,
@@ -211,19 +237,33 @@ fn run_host(mut t: TcpTransport) -> Result<(), Box<dyn std::error::Error>> {
         last_encoded = Instant::now();
         let captured_us = now_us();
 
-        let t0 = Instant::now();
-        if !cap.copy_bgra(&mut bgra)? {
-            continue;
+        if let Some(conv) = conv.as_mut() {
+            // Caminho sem cópia: a textura nunca sai da memória de vídeo.
+            let Some(src) = cap.current_texture() else {
+                continue;
+            };
+            let t1 = Instant::now();
+            let nv12_tex = conv.convert(src)?;
+            stats.convert_ms.push(ms(t1));
+
+            let t2 = Instant::now();
+            enc.submit_texture(nv12_tex)?;
+            stats.encode_ms.push(ms(t2));
+        } else {
+            let t0 = Instant::now();
+            if !cap.copy_bgra(&mut bgra)? {
+                continue;
+            }
+            stats.readback_ms.push(ms(t0));
+
+            let t1 = Instant::now();
+            bgra_to_nv12(&bgra, w as usize, h as usize, &mut nv12);
+            stats.convert_ms.push(ms(t1));
+
+            let t2 = Instant::now();
+            enc.submit(&nv12)?;
+            stats.encode_ms.push(ms(t2));
         }
-        stats.readback_ms.push(ms(t0));
-
-        let t1 = Instant::now();
-        bgra_to_nv12(&bgra, w as usize, h as usize, &mut nv12);
-        stats.convert_ms.push(ms(t1));
-
-        let t2 = Instant::now();
-        enc.submit(&nv12)?;
-        stats.encode_ms.push(ms(t2));
 
         for p in enc.take_packets() {
             let m = Message::Video {

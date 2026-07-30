@@ -121,15 +121,14 @@ Intel HD 4600 com driver antigo e não deve ser generalizado.
 
 ### Orçamento por frame, medido a 1360×768
 
-```
-leitura da GPU   4,1 ms   ← maior item; é o desvio que a decisão D3 elimina
-BGRA → NV12      1,9 ms   ← idem
-encode           4,5 ms
-```
+O desvio pela CPU foi **eliminado na Fase 1**. Ver decisão D3.
 
-Os dois primeiros somam 6 ms que a pipeline definitiva não deveria gastar: a
-textura sai da GPU e volta para ela logo em seguida. A 1080p esse desperdício
-mais que dobra.
+| | leitura GPU | conversão | encode | total |
+|---|---|---|---|---|
+| memória de sistema | 5,37 ms | 2,06 ms | 4,29 ms | **11,72 ms** |
+| **GPU direto** | — | 0,08 ms | 3,57 ms | **3,65 ms** |
+
+3,2× mais rápido, 8 ms por quadro. Comparação reproduzível com `--cpu-path`.
 
 > **Achado da etapa 4 que altera o design:** cada estágio passou isolado, e a
 > integração ainda assim falhou. Sem pacing nem descarte, a latência crescia
