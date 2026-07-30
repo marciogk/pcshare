@@ -15,8 +15,9 @@ use pcshare_core::MouseButton;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, GetDC, HDC, InvalidateRect, ReleaseDC,
-    SRCCOPY, StretchDIBits, ValidateRect,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLACK_BRUSH, DIB_RGB_COLORS, FillRect, GdiFlush, GetDC,
+    GetStockObject, HBRUSH, HDC, InvalidateRect, ReleaseDC, SRCCOPY, StretchDIBits, ValidateRect,
+    WHITE_BRUSH,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -198,6 +199,105 @@ impl Drop for Window {
             ReleaseDC(Some(self.hwnd), self.hdc);
             let _ = DestroyWindow(self.hwnd);
         }
+    }
+}
+
+/// Quadrado sólido, sempre no topo, que alterna entre preto e branco.
+///
+/// É o instrumento da medição de latência: o host o captura como parte da
+/// tela, e o viewer detecta em que quadro decodificado a troca de cor
+/// apareceu. A diferença de tempo atravessa o compositor do Windows, a
+/// captura, o encoder, a rede e o decodificador — praticamente tudo que os
+/// cronômetros internos não enxergavam.
+pub struct MarkerWindow {
+    hwnd: HWND,
+    hdc: HDC,
+    size: i32,
+}
+
+impl MarkerWindow {
+    /// Cria o marcador em `(x, y)` da tela, com `size` pixels de lado.
+    pub fn new(x: i32, y: i32, size: i32) -> Result<Self> {
+        unsafe {
+            let instance = GetModuleHandleW(None)?;
+            let class = w!("PcshareMarkerWindow");
+            let wc = WNDCLASSW {
+                lpfnWndProc: Some(marker_proc),
+                hInstance: instance.into(),
+                lpszClassName: class,
+                ..Default::default()
+            };
+            RegisterClassW(&wc);
+
+            let hwnd = CreateWindowExW(
+                // TOPMOST para nunca ser encoberto; NOACTIVATE para não
+                // roubar o foco a cada repintura.
+                WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                class,
+                w!("marcador"),
+                WS_POPUP | WS_VISIBLE,
+                x,
+                y,
+                size,
+                size,
+                None,
+                None,
+                Some(instance.into()),
+                None,
+            )?;
+
+            let hdc = GetDC(Some(hwnd));
+            Ok(Self { hwnd, hdc, size })
+        }
+    }
+
+    /// Pinta o marcador e **só retorna depois de o GDI ter despachado**.
+    ///
+    /// Importante para a medição: o instante marcado logo após esta chamada
+    /// precisa ser o momento em que a mudança foi entregue ao sistema, não o
+    /// momento em que ela entrou numa fila.
+    pub fn paint(&mut self, white: bool) {
+        unsafe {
+            let rect = RECT {
+                left: 0,
+                top: 0,
+                right: self.size,
+                bottom: self.size,
+            };
+            let brush = GetStockObject(if white { WHITE_BRUSH } else { BLACK_BRUSH });
+            FillRect(self.hdc, &rect, HBRUSH(brush.0));
+            let _ = GdiFlush();
+        }
+    }
+
+    /// Processa mensagens para a janela não ser considerada travada.
+    pub fn pump(&mut self) {
+        unsafe {
+            let mut msg = MSG::default();
+            while PeekMessageW(&mut msg, Some(self.hwnd), 0, 0, PM_REMOVE).as_bool() {
+                DispatchMessageW(&msg);
+            }
+        }
+    }
+}
+
+impl Drop for MarkerWindow {
+    fn drop(&mut self) {
+        unsafe {
+            ReleaseDC(Some(self.hwnd), self.hdc);
+            let _ = DestroyWindow(self.hwnd);
+        }
+    }
+}
+
+extern "system" fn marker_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe {
+        if msg == WM_PAINT {
+            // Quem pinta é `paint`; validar aqui evita repintura infinita.
+            let _ = ValidateRect(Some(hwnd), None);
+            return LRESULT(0);
+        }
+        DefWindowProcW(hwnd, msg, wp, lp)
     }
 }
 

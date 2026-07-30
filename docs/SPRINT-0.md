@@ -73,8 +73,9 @@ de produto, e display virtual é como a concorrência resolve isso.
 | Encode | 1080p30, < 33 ms/frame | ✅ 59,5 fps, 15,9 ms p50 (Quick Sync) |
 | Transporte isolado | entrega íntegra, RTT baixo | ✅ 0,061 ms p50 em 127.0.0.1 |
 | RTT do input sob carga de vídeo | responsivo | ✅ 10–15 ms p50 |
-| Latência captura→exibição | estável, sem deriva | ✅ 16,8 ms p50 / 20 ms p99, 1360×768 |
-| Latência glass-to-glass | < 80 ms na LAN | ⬜ **falta** — exige o protocolo com câmera |
+| Latência captura→exibição | estável, sem deriva | ✅ 16,8 ms p50 — **mede só parte do caminho** |
+| Latência tela→exibição | — | ⚠️ **68 a 83 ms p50** — ver abaixo |
+| Latência glass-to-glass | < 80 ms na LAN | ⚠️ estimada em **79 a 106 ms**; não atingida |
 | Banda, uso leve (IDE aberta) | — | 0,69 Mbps |
 | Banda, tela parada | < 100 kbps | ⬜ **não mensurável aqui** — ver abaixo |
 | Banda, vídeo em tela cheia | < 8 Mbps | ✅ 1,90 Mbps |
@@ -118,6 +119,39 @@ supressão por área alterada.
 Adotado GOP de 30 s, escolhido por medição e não por intuição. Sobreponível com
 `PCSHARE_GOP` para nova varredura em outro hardware — este resultado é de uma
 Intel HD 4600 com driver antigo e não deve ser generalizado.
+
+### A latência real é muito maior que a medida internamente
+
+Os 16,8 ms sempre mediram **captura → quadro decodificado**. O cronômetro
+começava quando a captura entregava o quadro — e é aí que mora o erro: o pixel
+já tinha mudado na tela bem antes disso.
+
+O modo `latencia` fecha o laço pela própria tela. Um marcador troca de cor e
+esperamos essa troca reaparecer num quadro decodificado, percorrendo
+**descarga na tela → compositor do Windows → captura DXGI → encode → rede →
+decode**:
+
+| Taxa | p50 | mín | p99 |
+|---|---|---|---|
+| 30 fps | 81,5 ms | 66,3 ms | 97,8 ms |
+| **60 fps** | **68,6 ms** | **46,6 ms** | 103,4 ms |
+
+Somando a apresentação no viewer e a resposta física dos monitores (10 a 25 ms,
+fora do alcance de qualquer software), o glass-to-glass fica entre **79 e
+106 ms**. A meta de 80 ms **não está atingida**.
+
+O que se sabe sobre a composição desse tempo, a 60 fps:
+
+- compositor do Windows, ~17 ms — inevitável
+- ritmo de captura, ~8 ms em média — foi o que a mudança para 60 fps cortou
+- encode, 3,6 ms — medido
+- **~30 ms ainda não atribuídos** — suspeitos: buffer interno do decodificador
+  e atraso da própria Desktop Duplication em relação à composição
+
+A conclusão que importa: **a pipeline não é o gargalo**. Encode a 3,6 ms e
+transporte a menos de 1 ms somam pouco perto do que o sistema operacional
+impõe. Otimizar codec ou rede daqui para frente rende pouco; o ganho está em
+descobrir os 30 ms restantes.
 
 ### Orçamento por frame, medido a 1360×768
 
