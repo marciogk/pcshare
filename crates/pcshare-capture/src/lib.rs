@@ -15,7 +15,7 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{
     DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_DESC, DXGI_OUTDUPL_FRAME_INFO,
-    IDXGIDevice, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+    DXGI_OUTDUPL_MOVE_RECT, IDXGIDevice, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
 };
 use windows::core::Interface;
 
@@ -61,9 +61,27 @@ pub struct FrameStats {
     /// retângulos se sobrepõem — não é uma fração exata, e sim um indicador
     /// de quanto trabalho o encoder teria.
     pub dirty_pixels: u64,
+    /// Regiões que apenas **mudaram de lugar**, sem conteúdo novo: janelas
+    /// arrastadas, rolagem por blit.
+    ///
+    /// Contam como alteração. Um frame pode ter zero dirty rects e ainda
+    /// assim ter mudado, e tratar isso como "nada aconteceu" congelaria a
+    /// tela do outro lado durante um arraste de janela.
+    pub move_rects: u32,
     /// `true` quando só o cursor se moveu e a imagem do desktop não mudou.
     /// Estes frames não devem gerar quadro de vídeo.
     pub mouse_only: bool,
+}
+
+impl FrameStats {
+    /// Se este frame precisa mesmo ser codificado.
+    ///
+    /// Base da supressão por área alterada, que o achado da etapa 1 exigiu:
+    /// o compositor entrega frames a 60 Hz mesmo com o desktop ocioso, e
+    /// codificar todos eles gasta banda para transmitir nada.
+    pub fn has_changes(&self) -> bool {
+        !self.mouse_only && (!self.dirty_rects.is_empty() || self.move_rects > 0)
+    }
 }
 
 pub struct DesktopCapture {
@@ -189,8 +207,10 @@ impl DesktopCapture {
             let mouse_only = info.LastPresentTime == 0;
 
             self.dirty_buf.clear();
+            let mut move_rects = 0;
             if !mouse_only {
                 self.read_dirty_rects()?;
+                move_rects = self.count_move_rects()?;
             }
 
             let dirty_pixels = self
@@ -207,6 +227,7 @@ impl DesktopCapture {
                 accumulated_frames: info.AccumulatedFrames,
                 dirty_rects: self.dirty_buf.clone(),
                 dirty_pixels,
+                move_rects,
                 mouse_only,
             }))
         }
@@ -282,6 +303,30 @@ impl DesktopCapture {
             let tex = tex.expect("CreateTexture2D retornou Ok sem textura");
             self.staging = Some(tex.clone());
             Ok(tex)
+        }
+    }
+
+    /// Quantas regiões foram apenas deslocadas neste frame.
+    ///
+    /// Só a contagem interessa por ora: serve para decidir se houve mudança.
+    /// Aproveitá-las de fato — mandando o deslocamento em vez dos pixels — é
+    /// otimização de banda para a Fase 1.
+    unsafe fn count_move_rects(&mut self) -> Result<u32, CaptureError> {
+        unsafe {
+            let mut buf = [DXGI_OUTDUPL_MOVE_RECT::default(); 64];
+            let mut needed: u32 = 0;
+            let capacity = (std::mem::size_of_val(&buf)) as u32;
+
+            match self
+                .duplication
+                .GetFrameMoveRects(capacity, buf.as_mut_ptr(), &mut needed)
+            {
+                Ok(()) => Ok(needed / std::mem::size_of::<DXGI_OUTDUPL_MOVE_RECT>() as u32),
+                // Buffer pequeno: não vale crescer, já sabemos que houve
+                // movimento, que é tudo que a decisão precisa.
+                Err(_) if needed > capacity => Ok(buf.len() as u32),
+                Err(e) => Err(e.into()),
+            }
         }
     }
 

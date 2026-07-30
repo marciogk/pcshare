@@ -31,7 +31,18 @@ fn main() {
 
     let _ = std::fs::create_dir_all("spike-output");
 
+    // Filtros para varredura rápida de parâmetros:
+    //   PCSHARE_SCENE=parado|desktop|video   PCSHARE_BACKEND=hw|sw
+    let só_cena = std::env::var("PCSHARE_SCENE").ok();
+    let só_backend = std::env::var("PCSHARE_BACKEND").ok();
+
     for backend in [Backend::Hardware, Backend::Software] {
+        if let Some(f) = só_backend.as_deref() {
+            let tag = if backend == Backend::Hardware { "hw" } else { "sw" };
+            if f != tag {
+                continue;
+            }
+        }
         let label = match backend {
             Backend::Hardware => "HARDWARE (Quick Sync / NVENC / AMF)",
             Backend::Software => "SOFTWARE (referência de comparação)",
@@ -41,6 +52,11 @@ fn main() {
         println!("{:=<70}", "");
 
         for scene in Scene::ALL {
+            if let Some(f) = só_cena.as_deref()
+                && !scene.name().starts_with(f)
+            {
+                continue;
+            }
             match run(backend, scene, width, height, fps, frames) {
                 Ok(r) => r.print(fps),
                 Err(e) => {

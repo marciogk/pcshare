@@ -48,6 +48,15 @@ static START: OnceLock<Instant> = OnceLock::new();
 /// para quem está do outro lado.
 static VIEW_ONLY: AtomicBool = AtomicBool::new(false);
 
+/// Host e viewer no mesmo processo, portanto com a mesma base de tempo.
+///
+/// Só nesse caso a latência captura→exibição significa alguma coisa: o
+/// carimbo do host e o relógio do viewer saem do mesmo `Instant`. Em
+/// processos separados — e mais ainda em máquinas separadas — subtrair um do
+/// outro produz lixo, e já produziu: −2073 ms numa medição real, que era
+/// exatamente a diferença entre os instantes de início dos dois processos.
+static SAME_PROCESS: AtomicBool = AtomicBool::new(false);
+
 fn now_us() -> i64 {
     START.get_or_init(Instant::now).elapsed().as_micros() as i64
 }
@@ -85,6 +94,7 @@ fn main() {
 }
 
 fn run_loopback() {
+    SAME_PROCESS.store(true, Ordering::SeqCst);
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind falhou");
     let addr = listener.local_addr().unwrap();
     println!("PCShare — Sprint 0, etapa 4: pipeline completa em {addr}");
@@ -144,6 +154,10 @@ fn run_host(mut t: TcpTransport) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     stats.input_events += 1;
                 }
+                Ok(Message::RequestKeyframe) => {
+                    enc.request_keyframe();
+                    stats.keyframe_requests += 1;
+                }
                 Ok(_) | Err(_) => {}
             }
         }
@@ -163,8 +177,14 @@ fn run_host(mut t: TcpTransport) -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => return Err(e.into()),
         };
 
-        // Cursor mexeu mas a tela não mudou: nada a codificar.
-        if frame.mouse_only {
+        // Nada mudou de fato: nem pixels novos, nem regiões deslocadas.
+        //
+        // Esta é a supressão que o achado da etapa 1 exigiu. O compositor
+        // entrega frames a 60 Hz mesmo com o desktop ocioso, e medimos na
+        // etapa 2 que numa tela imóvel o encoder gasta banda refinando
+        // qualidade sozinho. A resposta não é ajustar o encoder — é não
+        // chamá-lo.
+        if !frame.has_changes() {
             stats.skipped += 1;
             t.flush()?;
             continue;
@@ -235,6 +255,7 @@ struct HostStats {
     paced: u64,
     /// Descartados por contrapressão: o link não estava escoando.
     dropped: u64,
+    keyframe_requests: u64,
     access_lost: u64,
     input_events: u64,
     readback_ms: Vec<f64>,
@@ -246,7 +267,7 @@ impl HostStats {
     fn report(&mut self, t: &TcpTransport) {
         println!(
             "host: {} frames | leitura GPU {:.2} ms | BGRA→NV12 {:.2} ms | encode {:.2} ms \
-             | {:.2} Mbps | fila {} KB | ritmo {} desc {}{}{}",
+             | {:.2} Mbps | fila {} KB | ritmo {} desc {} sem-mudanca {}{}{}",
             self.frames,
             med(&mut self.readback_ms),
             med(&mut self.convert_ms),
@@ -255,6 +276,7 @@ impl HostStats {
             t.pending_out() / 1024,
             self.paced,
             self.dropped,
+            self.skipped,
             if self.input_events > 0 {
                 format!(
                     " | entrada {}{}",
@@ -299,13 +321,38 @@ fn run_viewer(mut t: TcpTransport) {
     };
     println!("viewer: decoder [{}]", dec.name());
 
-    let mut win = match window::Window::new(w!("PCShare — viewer (Sprint 0)"), 960, 540) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("viewer: não foi possível criar a janela: {e}");
-            return;
-        }
+    // Sem keyframe periódico, este pedido é a única coisa que dá ao
+    // decodificador um ponto de partida. Sem ele, tela preta para sempre.
+    let req = Message::RequestKeyframe;
+    if t.send(req.channel(), &req.encode()).is_err() {
+        eprintln!("viewer: não foi possível pedir o keyframe inicial");
+        return;
+    }
+
+    // `--headless <segundos>`: sem janela.
+    //
+    // Existe para medir a banda de uma tela realmente parada. Com a janela
+    // aberta é impossível: ela exibe a tela que está sendo capturada, então
+    // cada quadro exibido altera a tela e gera o próximo. A medição mediria a
+    // própria realimentação.
+    let headless: Option<u64> = {
+        let a: Vec<String> = std::env::args().collect();
+        a.iter().position(|x| x == "--headless").map(|i| {
+            a.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(20)
+        })
     };
+
+    let mut win = match headless {
+        Some(_) => None,
+        None => match window::Window::new(w!("PCShare — viewer (Sprint 0)"), 960, 540) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                eprintln!("viewer: não foi possível criar a janela: {e}");
+                return;
+            }
+        },
+    };
+    let deadline = headless.map(|s| Instant::now() + Duration::from_secs(s));
 
     // `--dump-frame <arquivo.bmp>`: grava o primeiro quadro decodificado e sai.
     let dump_to: Option<String> = {
@@ -320,16 +367,40 @@ fn run_viewer(mut t: TcpTransport) {
     let mut stale = 0u64;
     let mut sent_input = 0u64;
     let mut latency_ms: Vec<f64> = Vec::new();
+    let mut rtt_ms: Vec<f64> = Vec::new();
     let mut pending_time: VecDeque<i64> = VecDeque::new();
     let mut next_report = Instant::now() + Duration::from_secs(2);
+    let mut next_ping = Instant::now();
+    let mut nonce = 0u64;
     let mut first = true;
 
-    while win.pump() {
+    loop {
+        if let Some(w) = win.as_mut()
+            && !w.pump()
+        {
+            break;
+        }
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            break;
+        }
         let mut got_any = false;
 
+        // ---- sondagem de latência, válida entre máquinas quaisquer
+        if Instant::now() >= next_ping {
+            nonce += 1;
+            let m = Message::Ping {
+                nonce,
+                sent_us: now_us(),
+            };
+            if t.send(m.channel(), &m.encode()).is_err() {
+                return;
+            }
+            next_ping += Duration::from_millis(250);
+        }
+
         // ---- entrada do usuário, de volta para o host
-        let (cw, ch) = win.client_size();
-        for raw in win.take_input() {
+        let (cw, ch) = win.as_ref().map_or((0, 0), |w| w.client_size());
+        for raw in win.as_mut().map(|w| w.take_input()).unwrap_or_default() {
             let ev = match raw {
                 // A janela quase nunca tem o tamanho da tela remota. Mapear
                 // pela proporção é o que faz o cursor pousar onde o usuário
@@ -366,6 +437,12 @@ fn run_viewer(mut t: TcpTransport) {
                         }
                         got_any = true;
                     }
+                    // `sent_us` volta intacto: o RTT sai de uma subtração
+                    // local, então vale mesmo entre máquinas com relógios
+                    // sem qualquer sincronia.
+                    Ok(Message::Pong { sent_us, .. }) => {
+                        rtt_ms.push((now_us() - sent_us) as f64 / 1000.0);
+                    }
                     Ok(_) => {}
                     Err(e) => eprintln!("viewer: mensagem inválida: {e}"),
                 },
@@ -389,9 +466,13 @@ fn run_viewer(mut t: TcpTransport) {
         stale += batch.len().saturating_sub(1) as u64;
 
         if let Some(f) = batch.last() {
-            if let Some(sent) = sent_us {
+            if let Some(sent) = sent_us
+                && SAME_PROCESS.load(Ordering::Relaxed)
+            {
                 latency_ms.push((now_us() - sent) as f64 / 1000.0);
             }
+            // Em modo headless a conversão para BGRA ainda vale a pena: ela
+            // faz parte do custo do viewer, e omiti-la falsearia a medição.
             nv12_to_bgra(
                 &f.data,
                 f.width as usize,
@@ -399,7 +480,9 @@ fn run_viewer(mut t: TcpTransport) {
                 f.width as usize,
                 &mut rgb,
             );
-            win.present(&rgb, f.width as i32, f.height as i32);
+            if let Some(v) = win.as_mut() {
+                v.present(&rgb, f.width as i32, f.height as i32);
+            }
             frames += 1;
 
             if first {
@@ -421,19 +504,43 @@ fn run_viewer(mut t: TcpTransport) {
 
         if Instant::now() >= next_report {
             latency_ms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            rtt_ms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+            // A latência captura→exibição some quando os relógios não são o
+            // mesmo. Melhor não reportar do que reportar um número que
+            // parece medida e é diferença de instantes de partida.
+            let travessia = if SAME_PROCESS.load(Ordering::Relaxed) {
+                format!(
+                    " | captura→exibição p50 {:.1} ms  p99 {:.1} ms",
+                    pct(&latency_ms, 0.50),
+                    pct(&latency_ms, 0.99),
+                )
+            } else {
+                String::new()
+            };
+
             println!(
-                "viewer: {frames} exibidos, {stale} obsoletos, {sent_input} eventos enviados \
-                 | captura→exibição p50 {:.1} ms  p99 {:.1} ms",
-                pct(&latency_ms, 0.50),
-                pct(&latency_ms, 0.99),
+                "viewer: {frames} exibidos, {stale} obsoletos, {sent_input} eventos \
+                 | RTT p50 {:.1} ms  p99 {:.1} ms{travessia}",
+                pct(&rtt_ms, 0.50),
+                pct(&rtt_ms, 0.99),
             );
             latency_ms.clear();
+            rtt_ms.clear();
             next_report += Duration::from_secs(2);
         }
 
         if !got_any {
             std::thread::yield_now();
         }
+    }
+
+    if headless.is_some() {
+        let secs = now_us() as f64 / 1e6;
+        println!(
+            "\nviewer headless: {frames} quadros em {secs:.1} s  |  {:.0} kbps recebidos",
+            t.bytes_received() as f64 * 8.0 / secs / 1000.0
+        );
     }
 }
 

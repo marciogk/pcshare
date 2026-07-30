@@ -72,6 +72,7 @@ pub struct H264Encoder {
     frame_index: i64,
     ready: Vec<Packet>,
     tuning: Vec<&'static str>,
+    force_keyframe: bool,
 }
 
 impl H264Encoder {
@@ -163,6 +164,9 @@ impl H264Encoder {
                 frame_index: 0,
                 ready: Vec::new(),
                 tuning,
+                // O primeiro frame precisa ser keyframe: sem ele o
+                // decodificador não tem por onde começar.
+                force_keyframe: true,
             })
         }
     }
@@ -191,11 +195,28 @@ impl H264Encoder {
         (self.width as usize * self.height as usize) * 3 / 2
     }
 
+    /// Faz o próximo frame ser keyframe.
+    ///
+    /// Chamar quando um viewer entra na sessão ou quando há perda: são os
+    /// únicos dois momentos em que um keyframe se paga. Fora deles, ele é
+    /// banda gasta para retransmitir uma imagem que o outro lado já tem.
+    pub fn request_keyframe(&mut self) {
+        self.force_keyframe = true;
+    }
+
     /// Envia um frame. A saída pode não sair imediatamente — o encoder tem
     /// pipeline. Use [`Self::take_packets`] para coletar o que já ficou pronto.
     pub fn submit(&mut self, nv12: &[u8]) -> Result<()> {
         debug_assert_eq!(nv12.len(), self.nv12_len(), "buffer NV12 com tamanho errado");
         unsafe {
+            if self.force_keyframe {
+                if let Ok(codec) = self.transform.cast::<ICodecAPI>() {
+                    let _ = codec
+                        .SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &VARIANT::from(1u32));
+                }
+                self.force_keyframe = false;
+            }
+
             let duration = 10_000_000i64 / self.fps as i64;
             let time = self.frame_index * duration;
             self.frame_index += 1;
@@ -383,13 +404,25 @@ unsafe fn tune_rate_control(transform: &IMFTransform, fps: u32) -> Vec<&'static 
             applied.push("VBR");
         }
 
-        // Keyframes periódicos são desperdício em controle remoto: a tela
-        // muda pouco e o viewer pode pedir um keyframe quando precisar
-        // (entrada numa sessão, perda de pacotes). Um a cada 10 s é um meio
-        // termo seguro enquanto o pedido sob demanda não existe.
-        let gop = VARIANT::from(fps * 10);
+        // Keyframe periódico é desperdício em controle remoto. Numa tela
+        // parada, ele é praticamente *todo* o tráfego: a cada intervalo o
+        // encoder retransmite a imagem inteira que ninguém pediu.
+        //
+        // O intervalo vai para dez minutos — na prática, "nunca". Quem manda
+        // gerar keyframe é o viewer, via `request_keyframe`, nos dois momentos
+        // em que ele realmente precisa: ao entrar na sessão e ao detectar
+        // perda. Ver `Message::RequestKeyframe`.
+        // `PCSHARE_GOP` sobrepõe o intervalo, em frames, para experimentação.
+        let gop_frames = std::env::var("PCSHARE_GOP")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            // 30 s. Escolhido por varredura, não por intuição: em 3 s e 10 s a
+            // cena de uso ativo custava 186 e 125 kbps; em 30 s, 93 kbps, e
+            // alongar mais não melhorou nada.
+            .unwrap_or(fps * 30);
+        let gop = VARIANT::from(gop_frames);
         if codec.SetValue(&CODECAPI_AVEncMPVGOPSize, &gop).is_ok() {
-            applied.push("GOP 10s");
+            applied.push("keyframe sob demanda");
         }
 
         // Sem B-frames: reordenação adiciona latência de pipeline, que é

@@ -71,12 +71,53 @@ de produto, e display virtual é como a concorrência resolve isso.
 |---|---|---|
 | Captura | ≥ 30 fps nativo, sem perdas | ✅ 60 fps, 0 perdidos |
 | Encode | 1080p30, < 33 ms/frame | ✅ 59,5 fps, 15,9 ms p50 (Quick Sync) |
-| Transporte | entrega íntegra, RTT baixo | ✅ 0,061 ms p50 em 127.0.0.1 |
-| Latência captura→exibição | estável, sem deriva | ✅ 16,5 ms p50 / 21 ms p99, 1360×768 |
+| Transporte isolado | entrega íntegra, RTT baixo | ✅ 0,061 ms p50 em 127.0.0.1 |
+| RTT do input sob carga de vídeo | responsivo | ✅ 10–15 ms p50 |
+| Latência captura→exibição | estável, sem deriva | ✅ 16,8 ms p50 / 20 ms p99, 1360×768 |
 | Latência glass-to-glass | < 80 ms na LAN | ⬜ **falta** — exige o protocolo com câmera |
-| Banda, tela parada | < 100 kbps | ⚠️ 123 kbps; keyframe periódico domina |
-| Banda, vídeo em tela cheia | < 8 Mbps | ✅ 1,95 Mbps |
-| CPU no host | < 15% de um core | ⬜ não medido |
+| Banda, uso leve (IDE aberta) | — | 0,69 Mbps |
+| Banda, tela parada | < 100 kbps | ⬜ **não mensurável aqui** — ver abaixo |
+| Banda, vídeo em tela cheia | < 8 Mbps | ✅ 1,90 Mbps |
+| CPU no host | < 15% de um core | ✅ 8,6% de um núcleo, 63 MB de RAM |
+
+> O RTT de 0,061 ms e o de 10–15 ms não se contradizem: o primeiro é o
+> transporte sozinho, o segundo é o sistema real, onde o laço do viewer está
+> ocupado decodificando quando o Ping chega. **O segundo é o número de
+> produto** — é o que o usuário sente ao clicar.
+
+### Por que a banda de tela parada não foi medida
+
+O critério pressupõe uma tela imóvel, e esta máquina não tem uma: com o VS Code
+aberto, o contador `sem-mudanca` do host ficou em **zero** ao longo de 25 s —
+ou seja, a captura nunca reportou um único frame sem alteração. Bate com o
+achado da etapa 1 (zero timeouts com o desktop "ocioso").
+
+A supressão por área alterada está implementada e correta — usa dirty rects
+**e** move rects, para não confundir arraste de janela com ausência de mudança.
+Ela simplesmente não dispara neste workload. Medir o critério exige um desktop
+controlado, sem aplicação animada.
+
+O que se pode afirmar: **0,69 Mbps com uma IDE aberta e animando**, que é o
+caso realista de uma sessão de suporte.
+
+### Varredura de GOP (Quick Sync, 1080p30, 20 s por ponto)
+
+| GOP | parado | desktop | vídeo |
+|---|---|---|---|
+| 3 s | 153 kbps | 186 kbps | 1,94 Mbps |
+| 10 s | 157 kbps | 125 kbps | 1,92 Mbps |
+| **30 s** | 221 kbps | **93 kbps** | **1,90 Mbps** |
+| 120 s | 221 kbps | 93 kbps | 1,90 Mbps |
+
+Não é monotônico, e a cena **imóvel custa mais que a cena em movimento**
+(221 contra 93 kbps). Numa tela parada o Quick Sync gasta banda refinando
+qualidade sozinho, já que sobra taxa. A conclusão que importa: **ajustar o
+encoder tem retorno limitado; o ganho real vem de não chamá-lo.** Daí a
+supressão por área alterada.
+
+Adotado GOP de 30 s, escolhido por medição e não por intuição. Sobreponível com
+`PCSHARE_GOP` para nova varredura em outro hardware — este resultado é de uma
+Intel HD 4600 com driver antigo e não deve ser generalizado.
 
 ### Orçamento por frame, medido a 1360×768
 
