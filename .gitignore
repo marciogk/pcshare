@@ -9,3 +9,6 @@
 /spike-output
 *.h264
 *.mp4
+
+# Binário montado para copiar até a outra máquina no teste da etapa 5
+/pacote-notebook
