@@ -30,12 +30,19 @@
 //! PSK diferente, e o handshake falha na terceira mensagem. Para passar, o
 //! atacante precisaria da senha — que nunca trafega, em forma alguma.
 //!
-//! # Limite conhecido
+//! # Ordem de chegada
 //!
-//! O modo de transporte do Noise numera as mensagens implicitamente, então
-//! elas precisam ser decifradas **na ordem**. Sobre TCP isso é garantido. O
-//! canal de mídia da Fase 2, que será melhor-esforço, vai exigir números de
-//! sequência explícitos.
+//! O modo de transporte do Noise numera as mensagens implicitamente, o que
+//! exigiria decifrá-las na ordem exata de envio. Sobre TCP isso valia de
+//! graça; sobre QUIC não vale mais — cada quadro vai num fluxo independente,
+//! justamente para que um atrasado não segure o próximo, e a chegada fora de
+//! ordem passa a ser o comportamento desejado.
+//!
+//! Por isso o número vai **explícito** em cada mensagem, e o receptor o fixa
+//! antes de decifrar. Isso abriria espaço para repetição de mensagens, então
+//! entra também uma janela deslizante anti-repetição, no mesmo desenho usado
+//! por IPsec e DTLS: aceita qualquer número ainda não visto dentro das
+//! últimas 64 posições e rejeita o resto.
 
 use std::io;
 use std::time::{Duration, Instant};
@@ -52,9 +59,84 @@ const PATTERN: &str = "Noise_XXpsk3_25519_ChaChaPoly_BLAKE2s";
 /// autenticação e o nosso byte de continuação.
 const MAX_CHUNK: usize = 65535 - 16 - 1;
 
-/// Marca o último pedaço de uma mensagem fatiada.
-const CHUNK_FINAL: u8 = 1;
-const CHUNK_MORE: u8 = 0;
+/// Cabeçalho de cada pedaço, dentro da parte cifrada:
+/// `[id da mensagem u32][índice u16][total u16]`.
+///
+/// Nada aqui é enfeite, e cada campo custou um defeito observado em execução:
+///
+/// - **id da mensagem** — sobre TCP os pedaços de uma mensagem chegavam
+///   grudados e bastava um buffer por canal. Sobre QUIC cada pedaço viaja num
+///   fluxo próprio e os de mensagens diferentes se intercalam; concatená-los
+///   no mesmo buffer produzia lixo.
+/// - **índice e total** — uma simples marca de "último pedaço" também não
+///   basta: o último pode chegar **primeiro**, e aí ele sozinho parecia uma
+///   mensagem completa. Só sabendo quantos são e onde cada um entra dá para
+///   remontar sem depender da ordem.
+const CHUNK_HEADER: usize = 4 + 2 + 2;
+
+/// Teto de mensagens sendo remontadas ao mesmo tempo. Um par hostil não pode
+/// fazer a memória crescer indefinidamente mandando só pedaços iniciais.
+const MAX_PARTIAL: usize = 16;
+
+/// Mensagem em remontagem. Os pedaços podem chegar em qualquer ordem, então
+/// cada um vai para o seu lugar e contamos quantos ainda faltam.
+struct Partial {
+    chunks: Vec<Option<Vec<u8>>>,
+    faltam: usize,
+}
+
+impl Partial {
+    fn new(total: usize) -> Self {
+        Self {
+            chunks: vec![None; total],
+            faltam: total,
+        }
+    }
+}
+
+/// Prefixo com o número da mensagem, em little-endian.
+const NONCE_LEN: usize = 8;
+
+/// Janela deslizante anti-repetição.
+///
+/// Sem ela, os números explícitos deixariam um atacante reenviar uma mensagem
+/// capturada — um clique, por exemplo — e o receptor a aceitaria como nova.
+struct ReplayWindow {
+    highest: u64,
+    /// Bit `i` marca o número `highest - i` como já visto.
+    seen: u64,
+}
+
+impl ReplayWindow {
+    fn new() -> Self {
+        Self {
+            highest: 0,
+            seen: 0,
+        }
+    }
+
+    /// `true` se o número é novo e aceitável.
+    fn accept(&mut self, n: u64) -> bool {
+        if n > self.highest {
+            let avanco = n - self.highest;
+            self.seen = if avanco >= 64 { 0 } else { self.seen << avanco };
+            self.seen |= 1;
+            self.highest = n;
+            return true;
+        }
+        let atraso = self.highest - n;
+        if atraso >= 64 {
+            // Velha demais para provar que não é repetição.
+            return false;
+        }
+        let bit = 1u64 << atraso;
+        if self.seen & bit != 0 {
+            return false;
+        }
+        self.seen |= bit;
+        true
+    }
+}
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -172,12 +254,12 @@ pub struct SecureTransport<T: Transport> {
     inner: T,
     noise: TransportState,
     remote_static: Vec<u8>,
-    /// Remontagem por canal. Mensagens grandes viram vários pedaços, e manter
-    /// buffers separados evita que um vídeo fatiado se misture a um evento de
-    /// entrada que chegue no meio.
-    partial_control: Vec<u8>,
-    partial_media: Vec<u8>,
+    /// Remontagem indexada por identificador de mensagem.
+    partial: std::collections::HashMap<u32, Partial>,
+    /// Contador dos identificadores que emitimos.
+    next_msg_id: u32,
     scratch: Vec<u8>,
+    replay: ReplayWindow,
 }
 
 impl<T: Transport> SecureTransport<T> {
@@ -193,12 +275,6 @@ impl<T: Transport> SecureTransport<T> {
         fingerprint_of(&self.remote_static)
     }
 
-    fn buffer_for(&mut self, channel: Channel) -> &mut Vec<u8> {
-        match channel {
-            Channel::Control => &mut self.partial_control,
-            Channel::Media => &mut self.partial_media,
-        }
-    }
 }
 
 impl<T: Transport> Transport for SecureTransport<T> {
@@ -206,26 +282,44 @@ impl<T: Transport> Transport for SecureTransport<T> {
         // Uma mensagem do Noise não passa de 64 KB; um keyframe passa. Fatiar
         // aqui, e não no chamador, mantém o limite do protocolo invisível para
         // o resto do código.
+        let msg_id = self.next_msg_id;
+        self.next_msg_id = self.next_msg_id.wrapping_add(1);
+
+        let usable = MAX_CHUNK - CHUNK_HEADER;
+        let total = payload.len().div_ceil(usable).max(1);
+        if total > u16::MAX as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "mensagem exige pedaços demais",
+            ));
+        }
+
         let mut rest = payload;
+        let mut index = 0u16;
         loop {
-            let take = rest.len().min(MAX_CHUNK);
+            let take = rest.len().min(usable);
             let (chunk, tail) = rest.split_at(take);
-            let final_chunk = tail.is_empty();
 
             self.scratch.clear();
-            self.scratch
-                .push(if final_chunk { CHUNK_FINAL } else { CHUNK_MORE });
+            self.scratch.extend_from_slice(&msg_id.to_le_bytes());
+            self.scratch.extend_from_slice(&index.to_le_bytes());
+            self.scratch.extend_from_slice(&(total as u16).to_le_bytes());
             self.scratch.extend_from_slice(chunk);
+            index += 1;
 
-            let mut out = vec![0u8; self.scratch.len() + 16];
+            // Lido antes de cifrar: `write_message` incrementa o contador.
+            let nonce = self.noise.sending_nonce();
+
+            let mut out = vec![0u8; NONCE_LEN + self.scratch.len() + 16];
+            out[..NONCE_LEN].copy_from_slice(&nonce.to_le_bytes());
             let n = self
                 .noise
-                .write_message(&self.scratch, &mut out)
+                .write_message(&self.scratch, &mut out[NONCE_LEN..])
                 .map_err(bad)?;
-            out.truncate(n);
+            out.truncate(NONCE_LEN + n);
             self.inner.send(channel, &out)?;
 
-            if final_chunk {
+            if tail.is_empty() {
                 return Ok(());
             }
             rest = tail;
@@ -238,26 +332,85 @@ impl<T: Transport> Transport for SecureTransport<T> {
                 return Ok(None);
             };
 
-            let mut plain = vec![0u8; cipher.len()];
+            if cipher.len() < NONCE_LEN {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "mensagem cifrada sem número de sequência",
+                ));
+            }
+            let (nonce_bytes, body) = cipher.split_at(NONCE_LEN);
+            let nonce = u64::from_le_bytes(nonce_bytes.try_into().unwrap());
+
+            if !self.replay.accept(nonce) {
+                // Repetida ou velha demais. Descartar em silêncio é o certo:
+                // responder daria a um atacante um oráculo para sondar quais
+                // números já passaram.
+                continue;
+            }
+            self.noise.set_receiving_nonce(nonce);
+
+            let mut plain = vec![0u8; body.len()];
             let n = self
                 .noise
-                .read_message(&cipher, &mut plain)
+                .read_message(body, &mut plain)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
             plain.truncate(n);
 
-            let Some((&flag, body)) = plain.split_first() else {
+            if plain.len() < CHUNK_HEADER {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "pedaço cifrado sem cabeçalho",
                 ));
-            };
-
-            let buf = self.buffer_for(channel);
-            buf.extend_from_slice(body);
-            if flag == CHUNK_FINAL {
-                return Ok(Some((channel, std::mem::take(buf))));
             }
-            // Pedaço intermediário: continua lendo.
+            let msg_id = u32::from_le_bytes(plain[0..4].try_into().unwrap());
+            let index = u16::from_le_bytes(plain[4..6].try_into().unwrap()) as usize;
+            let total = u16::from_le_bytes(plain[6..8].try_into().unwrap()) as usize;
+            let body = &plain[CHUNK_HEADER..];
+
+            if total == 0 || index >= total {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "índice de pedaço fora do total declarado",
+                ));
+            }
+
+            // Caminho comum: mensagem inteira num pedaço só. A esmagadora
+            // maioria cabe aqui e nem toca no mapa de remontagem.
+            if total == 1 {
+                return Ok(Some((channel, body.to_vec())));
+            }
+
+            if self.partial.len() >= MAX_PARTIAL && !self.partial.contains_key(&msg_id) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "mensagens incompletas demais em remontagem",
+                ));
+            }
+
+            let slot = self
+                .partial
+                .entry(msg_id)
+                .or_insert_with(|| Partial::new(total));
+            if slot.chunks.len() != total {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "total de pedaços divergente para a mesma mensagem",
+                ));
+            }
+            if slot.chunks[index].is_none() {
+                slot.faltam -= 1;
+            }
+            slot.chunks[index] = Some(body.to_vec());
+
+            if slot.faltam == 0 {
+                let pronta = self.partial.remove(&msg_id).expect("acabou de existir");
+                let mut completa = Vec::new();
+                for parte in pronta.chunks {
+                    completa.extend_from_slice(&parte.expect("nenhum pedaço faltando"));
+                }
+                return Ok(Some((channel, completa)));
+            }
+            // Ainda falta pedaço: continua lendo.
         }
     }
 
@@ -384,9 +537,10 @@ fn run_handshake<T: Transport>(
         inner,
         noise,
         remote_static,
-        partial_control: Vec::new(),
-        partial_media: Vec::new(),
+        partial: std::collections::HashMap::new(),
+        next_msg_id: 0,
         scratch: Vec::new(),
+        replay: ReplayWindow::new(),
     };
 
     // Confirmação de chave, e não é formalidade.
@@ -578,6 +732,152 @@ mod tests {
             data: (0..300_000u32).map(|i| (i % 251) as u8).collect(),
         };
         troca(&mut h, &mut v, &grande);
+    }
+
+    /// Cifra um pedaço solto, no formato do fio, para poder embaralhar a
+    /// entrega nos testes.
+    fn cifra_pedaco(
+        de: &mut SecureTransport<TcpTransport>,
+        msg_id: u32,
+        index: u16,
+        total: u16,
+        corpo: &[u8],
+    ) -> Vec<u8> {
+        let nonce = de.noise.sending_nonce();
+        let mut plain = Vec::new();
+        plain.extend_from_slice(&msg_id.to_le_bytes());
+        plain.extend_from_slice(&index.to_le_bytes());
+        plain.extend_from_slice(&total.to_le_bytes());
+        plain.extend_from_slice(corpo);
+
+        let mut out = vec![0u8; NONCE_LEN + plain.len() + 16];
+        out[..NONCE_LEN].copy_from_slice(&nonce.to_le_bytes());
+        let k = de.noise.write_message(&plain, &mut out[NONCE_LEN..]).unwrap();
+        out.truncate(NONCE_LEN + k);
+        out
+    }
+
+    fn espera(
+        rx: &mut SecureTransport<TcpTransport>,
+        tx: &mut SecureTransport<TcpTransport>,
+    ) -> (Channel, Vec<u8>) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            tx.inner.flush().unwrap();
+            if let Some(v) = rx.poll().unwrap() {
+                return v;
+            }
+            assert!(Instant::now() < deadline, "nada chegou");
+            std::thread::yield_now();
+        }
+    }
+
+    /// O defeito que a mudança para QUIC expôs.
+    ///
+    /// Com um fluxo por pedaço, os pedaços de mensagens diferentes se
+    /// intercalam. Antes do identificador de mensagem eles eram concatenados
+    /// no mesmo buffer e produziam lixo.
+    #[test]
+    fn pedacos_intercalados_de_mensagens_diferentes_remontam() {
+        let (mut h, mut v) = par_seguro("senha", "senha").unwrap();
+
+        let a1 = cifra_pedaco(&mut h, 10, 0, 2, &[0xA1; 50]);
+        let b1 = cifra_pedaco(&mut h, 20, 0, 2, &[0xB1; 50]);
+        let a2 = cifra_pedaco(&mut h, 10, 1, 2, &[0xA2; 50]);
+        let b2 = cifra_pedaco(&mut h, 20, 1, 2, &[0xB2; 50]);
+
+        for c in [&a1, &b1, &a2, &b2] {
+            h.inner.send(Channel::Media, c).unwrap();
+        }
+        h.inner.flush().unwrap();
+
+        let (_, primeira) = espera(&mut v, &mut h);
+        let mut esperada_a = vec![0xA1u8; 50];
+        esperada_a.extend_from_slice(&[0xA2; 50]);
+        assert_eq!(primeira, esperada_a, "mensagem 10 remontada errado");
+
+        let (_, segunda) = espera(&mut v, &mut h);
+        let mut esperada_b = vec![0xB1u8; 50];
+        esperada_b.extend_from_slice(&[0xB2; 50]);
+        assert_eq!(segunda, esperada_b, "mensagem 20 remontada errado");
+    }
+
+    /// O defeito que sobrou depois da primeira correção: com fluxos
+    /// independentes o **último** pedaço pode chegar primeiro, e uma simples
+    /// marca de "final" o fazia parecer uma mensagem completa sozinho.
+    #[test]
+    fn ultimo_pedaco_chegando_primeiro_nao_trunca() {
+        let (mut h, mut v) = par_seguro("senha", "senha").unwrap();
+
+        let p0 = cifra_pedaco(&mut h, 7, 0, 3, &[0x01; 40]);
+        let p1 = cifra_pedaco(&mut h, 7, 1, 3, &[0x02; 40]);
+        let p2 = cifra_pedaco(&mut h, 7, 2, 3, &[0x03; 40]);
+
+        // Ordem de chegada: último, primeiro, meio.
+        for c in [&p2, &p0, &p1] {
+            h.inner.send(Channel::Media, c).unwrap();
+        }
+        h.inner.flush().unwrap();
+
+        let (_, msg) = espera(&mut v, &mut h);
+        let mut esperada = vec![0x01u8; 40];
+        esperada.extend_from_slice(&[0x02; 40]);
+        esperada.extend_from_slice(&[0x03; 40]);
+        assert_eq!(msg, esperada, "remontagem fora de ordem falhou");
+    }
+
+    #[test]
+    fn janela_anti_repeticao_aceita_novos_e_rejeita_repetidos() {
+        let mut w = ReplayWindow::new();
+        assert!(w.accept(0), "primeira mensagem");
+        assert!(!w.accept(0), "repetição imediata");
+
+        assert!(w.accept(1));
+        assert!(w.accept(5), "salto para frente");
+        assert!(w.accept(3), "atrasada, mas dentro da janela");
+        assert!(!w.accept(3), "atrasada repetida");
+        assert!(!w.accept(5), "a mais recente, repetida");
+
+        // Muito antiga: fora da janela de 64.
+        assert!(w.accept(500));
+        assert!(!w.accept(400));
+        assert!(w.accept(490), "ainda dentro das últimas 64");
+    }
+
+    /// Sobre QUIC cada quadro vai num fluxo independente, então a chegada
+    /// fora de ordem é o comportamento **desejado** — e a decifragem precisa
+    /// sobreviver a ela.
+    #[test]
+    fn midia_fora_de_ordem_e_decifrada() {
+        let (mut h, mut v) = par_seguro("senha", "senha").unwrap();
+
+        // Cifra três mensagens com o estado de envio do host, sem passar pelo
+        // transporte — é o que permite reordená-las antes da entrega.
+        let mut cifradas = Vec::new();
+        for n in 0..3u32 {
+            cifradas.push(cifra_pedaco(&mut h, n, 0, 1, &[n as u8; 100]));
+        }
+
+        // Entrega na ordem inversa, pelo transporte de baixo do host.
+        cifradas.reverse();
+        for c in &cifradas {
+            h.inner.send(Channel::Media, c).unwrap();
+        }
+        h.inner.flush().unwrap();
+
+        for esperado in [2u8, 1, 0] {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                h.inner.flush().unwrap();
+                if let Some((canal, dados)) = v.poll().unwrap() {
+                    assert_eq!(canal, Channel::Media);
+                    assert_eq!(dados, vec![esperado; 100]);
+                    break;
+                }
+                assert!(Instant::now() < deadline, "mensagem {esperado} não chegou");
+                std::thread::yield_now();
+            }
+        }
     }
 
     #[test]

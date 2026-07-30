@@ -123,14 +123,46 @@ antigos não aceitam texturas, e `H264Encoder::is_gpu_direct` decide qual usar.
 
 ### D3 (histórico) — por que H.264 e não AV1
 
-### D4 — Transporte atrás de uma abstração, desde a primeira linha
+### D4 — Transporte atrás de uma abstração  ✅ TROCA REALIZADA
 
-O Sprint 0 usa TCP na LAN. A Fase 2 troca por WebRTC/ICE.
+O Sprint 0 usou TCP na LAN. A Fase 2 trocou por **QUIC**.
 
-Essa troca **não pode** exigir reescrever a pipeline de vídeo. O host e o
-viewer conversam com um trait `Transport`; quem implementa é detalhe.
+A troca **não podia** exigir reescrever a pipeline de vídeo, e não exigiu: o
+host e o viewer conversam com o trait `Transport` e nenhuma linha de captura,
+codec ou exibição mudou. A abstração se pagou.
 
-Sem essa costura, a migração para WebRTC vira uma reescrita.
+**Por que QUIC, e não WebRTC.** O que precisávamos do WebRTC era a
+independência entre fluxos e o transporte sobre UDP (base da travessia de NAT).
+DTLS e SCTP seriam redundantes: a criptografia ponta a ponta já vem do Noise
+(D7), que ainda dá autenticação por senha — coisa que o DTLS não daria.
+
+**Mapeamento dos canais:**
+
+- **Controle** — um fluxo bidirecional, confiável e ordenado, vivo pela sessão.
+- **Mídia** — **um fluxo unidirecional por quadro**. Cada quadro é confiável em
+  si e independente dos outros: um quadro atrasado não segura o próximo.
+
+Isto corrige o defeito registrado desde a etapa 3: sobre TCP, um pacote de
+vídeo perdido segura tudo que vem atrás e **congela a tela inteira** por um
+tempo de ida e volta. A medição da etapa 3 não flagrou nada porque foi feita em
+127.0.0.1, onde não há perda. Coberto agora pelo teste
+`controle_nao_espera_a_midia`: um quadro de 2 MB não atrasa um comando.
+
+O TCP continua no código (`--tcp`) para comparação.
+
+> **Três defeitos que a troca expôs, todos na camada Noise.** A entrega
+> independente quebrou suposições que o TCP escondia:
+>
+> 1. **Ordem.** O Noise numera as mensagens implicitamente. Passou a enviar o
+>    número explícito, com janela deslizante anti-repetição.
+> 2. **Mistura de mensagens.** Pedaços de mensagens diferentes se intercalam;
+>    concatená-los num buffer por canal produzia lixo. Entrou identificador de
+>    mensagem.
+> 3. **Pedaço final chegando primeiro.** Uma marca de "último" não basta — ele
+>    sozinho parecia mensagem completa. Entraram índice e total.
+>
+> Os três só apareceram rodando, não compilando. É a razão de cada etapa ter
+> um teste que a trava.
 
 ### D5 — Arquitetura de dois processos no host (a partir da Fase 3)
 

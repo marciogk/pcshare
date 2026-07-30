@@ -26,7 +26,10 @@ use pcshare_gpu::GpuContext;
 use pcshare_codec::convert::{bgra_to_nv12, nv12_to_bgra};
 use pcshare_codec::{H264Decoder, H264Encoder};
 use pcshare_core::secure;
-use pcshare_core::{Channel, Identity, InputEvent, Message, TcpTransport, Transport};
+use pcshare_core::quic::QuicListener;
+use pcshare_core::{
+    Channel, Identity, InputEvent, Message, QuicTransport, TcpTransport, Transport,
+};
 use windows::core::w;
 
 const FPS: u32 = 30;
@@ -75,6 +78,8 @@ fn main() {
     // `--sem-cripto` mantém o caminho em texto claro para comparação de
     // custo. Nunca deve existir num binário distribuído.
     let plaintext = args.iter().any(|a| a == "--sem-cripto");
+    // `--tcp` volta ao transporte antigo, para comparação.
+    let quic = !args.iter().any(|a| a == "--tcp");
 
     match args.first().map(String::as_str) {
         Some("host") => {
@@ -86,24 +91,16 @@ fn main() {
             println!("  Senha da sessão  : {password}");
             println!("  Impressão digital: {}\n", identity.fingerprint());
 
-            let listener = TcpListener::bind(&bind).expect("bind falhou");
-            println!("host aguardando viewer em {bind}");
-            let tcp = TcpTransport::accept(&listener).expect("accept falhou");
-
-            let result = if plaintext {
-                eprintln!("AVISO: sessão SEM criptografia");
-                run_host(tcp)
+            println!("host aguardando viewer em {bind} ({})", transporte(quic));
+            let result = if quic {
+                let listener =
+                    QuicListener::bind(bind.parse().expect("endereço inválido")).expect("bind");
+                let t = listener.accept().expect("accept falhou");
+                servir(t, &identity, &password, plaintext)
             } else {
-                match secure::accept(tcp, &identity, &password) {
-                    Ok(sec) => {
-                        println!("host: sessão cifrada com {}", sec.remote_fingerprint());
-                        run_host(sec)
-                    }
-                    Err(e) => {
-                        eprintln!("host: autenticação recusada ({e})");
-                        return;
-                    }
-                }
+                let listener = TcpListener::bind(&bind).expect("bind falhou");
+                let t = TcpTransport::accept(&listener).expect("accept falhou");
+                servir(t, &identity, &password, plaintext)
             };
             if let Err(e) = result {
                 eprintln!("host encerrou: {e}");
@@ -114,29 +111,27 @@ fn main() {
                 .get(1)
                 .cloned()
                 .unwrap_or_else(|| "127.0.0.1:7000".into());
-            let tcp = TcpTransport::connect(&addr).expect("connect falhou");
-            println!("viewer conectado a {addr}");
-
-            if plaintext {
-                eprintln!("AVISO: sessão SEM criptografia");
-                run_viewer(tcp);
-                return;
-            }
-
-            let Some(password) = arg_value("--password") else {
-                eprintln!("viewer: informe --password <senha exibida pelo host>");
-                return;
+            let password = if plaintext {
+                String::new()
+            } else {
+                match arg_value("--password") {
+                    Some(p) => p,
+                    None => {
+                        eprintln!("viewer: informe --password <senha exibida pelo host>");
+                        return;
+                    }
+                }
             };
             let identity = load_identity().expect("identidade");
-            match secure::connect(tcp, &identity, &password) {
-                Ok(sec) => {
-                    // Conferir esta impressão com quem está do outro lado é o
-                    // que fecha o buraco de intermediação — o servidor de
-                    // sinalização da Fase 2 não é confiável por natureza.
-                    println!("viewer: host autenticado, impressão {}", sec.remote_fingerprint());
-                    run_viewer(sec);
-                }
-                Err(e) => eprintln!("viewer: não foi possível autenticar ({e})"),
+            println!("viewer conectando a {addr} ({})", transporte(quic));
+
+            if quic {
+                let t = QuicTransport::connect(addr.parse().expect("endereço inválido"))
+                    .expect("connect falhou");
+                assistir(t, &identity, &password, plaintext);
+            } else {
+                let t = TcpTransport::connect(&addr).expect("connect falhou");
+                assistir(t, &identity, &password, plaintext);
             }
         }
         _ => run_loopback(),
@@ -188,6 +183,48 @@ fn load_identity() -> Result<Identity, Box<dyn std::error::Error>> {
     // TODO(Fase 3): a chave fica em texto claro no perfil do usuário. O
     // produto precisa protegê-la com DPAPI e permissões restritas.
     Ok(id)
+}
+
+fn transporte(quic: bool) -> &'static str {
+    if quic { "QUIC" } else { "TCP" }
+}
+
+/// Handshake do lado do host e entrada no laço de captura.
+fn servir<T: Transport>(
+    t: T,
+    identity: &Identity,
+    password: &str,
+    plaintext: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if plaintext {
+        eprintln!("AVISO: sessão SEM criptografia");
+        return run_host(t);
+    }
+    let sec = secure::accept(t, identity, password)?;
+    println!("host: sessão cifrada com {}", sec.remote_fingerprint());
+    run_host(sec)
+}
+
+/// Handshake do lado do viewer e entrada no laço de exibição.
+fn assistir<T: Transport>(t: T, identity: &Identity, password: &str, plaintext: bool) {
+    if plaintext {
+        eprintln!("AVISO: sessão SEM criptografia");
+        run_viewer(t);
+        return;
+    }
+    match secure::connect(t, identity, password) {
+        Ok(sec) => {
+            // Conferir esta impressão com quem está do outro lado é o que
+            // fecha o buraco de intermediação — o servidor de sinalização da
+            // Fase 2 não é confiável por natureza.
+            println!(
+                "viewer: host autenticado, impressão {}",
+                sec.remote_fingerprint()
+            );
+            run_viewer(sec);
+        }
+        Err(e) => eprintln!("viewer: não foi possível autenticar ({e})"),
+    }
 }
 
 fn arg_value(nome: &str) -> Option<String> {
