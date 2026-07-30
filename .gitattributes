@@ -1,0 +1,24 @@
+# Normaliza fins de linha: LF no repositório, nativo no working copy.
+* text=auto
+
+# Fontes sempre com LF, inclusive no disco — evita ruído em diffs
+# quando o projeto for tocado por CI Linux ou por outro colaborador.
+*.rs      text eol=lf
+*.toml    text eol=lf
+*.md      text eol=lf
+*.json    text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+
+# Scripts do Windows precisam de CRLF para funcionar.
+*.ps1     text eol=crlf
+*.cmd     text eol=crlf
+*.bat     text eol=crlf
+
+# Binários: nunca normalizar.
+*.docx    binary
+*.png     binary
+*.ico     binary
+*.exe     binary
+*.h264    binary
+*.mp4     binary
