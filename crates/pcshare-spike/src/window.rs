@@ -8,7 +8,10 @@
 //! custo próprio, e ele **está incluído** no número glass-to-glass. O produto
 //! deve ficar abaixo do que medirmos aqui, não acima.
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+use pcshare_core::MouseButton;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -23,6 +26,39 @@ use windows::core::{PCWSTR, Result, w};
 /// carregar estado. Como o spike tem exatamente uma janela, uma flag global
 /// resolve sem introduzir mapa de HWND.
 static CLOSED: AtomicBool = AtomicBool::new(false);
+
+/// Fila de entrada preenchida pelo `wndproc`, drenada por [`Window::take_input`].
+static EVENTS: Mutex<Vec<RawEvent>> = Mutex::new(Vec::new());
+
+/// Evento cru da janela. As coordenadas estão em **pixels da área cliente**;
+/// a conversão para pixels do host acontece em `main.rs`, onde as duas
+/// dimensões são conhecidas.
+#[derive(Debug, Clone, Copy)]
+pub enum RawEvent {
+    Move { x: i32, y: i32 },
+    Button { button: MouseButton, down: bool },
+    Wheel { delta: i32 },
+    Key { scancode: u32, down: bool },
+}
+
+fn push(ev: RawEvent) {
+    if let Ok(mut q) = EVENTS.lock() {
+        // Um viewer que não drena não pode fazer a fila crescer sem limite.
+        // Entrada velha não tem valor: descartamos a mais antiga.
+        if q.len() > 512 {
+            q.remove(0);
+        }
+        q.push(ev);
+    }
+}
+
+fn lo_word(v: isize) -> i32 {
+    (v & 0xFFFF) as u16 as i16 as i32
+}
+
+fn hi_word(v: isize) -> i32 {
+    ((v >> 16) & 0xFFFF) as u16 as i16 as i32
+}
 
 pub struct Window {
     hwnd: HWND,
@@ -87,6 +123,11 @@ impl Window {
             }
         }
         !CLOSED.load(Ordering::SeqCst)
+    }
+
+    /// Drena os eventos de mouse e teclado acumulados desde a última chamada.
+    pub fn take_input(&mut self) -> Vec<RawEvent> {
+        EVENTS.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
     }
 
     /// Área cliente atual, para saber em que tamanho desenhar.
@@ -173,6 +214,57 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 let _ = ValidateRect(Some(hwnd), None);
                 LRESULT(0)
             }
+
+            WM_MOUSEMOVE => {
+                push(RawEvent::Move {
+                    x: lo_word(lp.0),
+                    y: hi_word(lp.0),
+                });
+                LRESULT(0)
+            }
+            WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN
+            | WM_MBUTTONUP => {
+                let (button, down) = match msg {
+                    WM_LBUTTONDOWN => (MouseButton::Left, true),
+                    WM_LBUTTONUP => (MouseButton::Left, false),
+                    WM_RBUTTONDOWN => (MouseButton::Right, true),
+                    WM_RBUTTONUP => (MouseButton::Right, false),
+                    WM_MBUTTONDOWN => (MouseButton::Middle, true),
+                    _ => (MouseButton::Middle, false),
+                };
+                // A posição vem junto com o clique: sem isso, um clique
+                // rápido depois de um movimento pode ser injetado na posição
+                // anterior do cursor.
+                push(RawEvent::Move {
+                    x: lo_word(lp.0),
+                    y: hi_word(lp.0),
+                });
+                push(RawEvent::Button { button, down });
+                LRESULT(0)
+            }
+            WM_MOUSEWHEEL => {
+                push(RawEvent::Wheel {
+                    delta: hi_word(wp.0 as isize),
+                });
+                LRESULT(0)
+            }
+
+            // As variantes SYS existem para combinações com Alt e para F10.
+            // Ignorá-las deixaria Alt+Tab e Alt+F4 sem funcionar na máquina
+            // remota.
+            WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP => {
+                let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+                let scan = ((lp.0 >> 16) & 0xFF) as u32;
+                let extended = (lp.0 >> 24) & 1 != 0;
+                push(RawEvent::Key {
+                    // Marca a tecla estendida no próprio código; `input.rs`
+                    // reconhece o prefixo e repõe a flag na injeção.
+                    scancode: if extended { 0xE000 | scan } else { scan },
+                    down,
+                });
+                LRESULT(0)
+            }
+
             _ => DefWindowProcW(hwnd, msg, wp, lp),
         }
     }

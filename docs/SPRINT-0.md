@@ -67,14 +67,37 @@ de produto, e display virtual é como a concorrência resolve isso.
 
 ## Critério de saída (mensurável)
 
-| Métrica | Alvo | Como medir |
+| Métrica | Alvo | Resultado |
 |---|---|---|
-| Captura | ≥ 30 fps na resolução nativa, sem frames perdidos | ✅ atingido (60 fps, 0 perdidos) |
-| Encode | 1080p30 em tempo real, < 33 ms/frame | frame sintético 1920×1080 |
-| Latência glass-to-glass | < 80 ms na LAN, resolução nativa | ver protocolo abaixo |
-| CPU no host | < 15% de um core | Gerenciador de Tarefas |
-| Banda, tela parada | < 100 kbps | contador de bytes no transporte |
-| Banda, vídeo em tela cheia | < 8 Mbps | contador de bytes no transporte |
+| Captura | ≥ 30 fps nativo, sem perdas | ✅ 60 fps, 0 perdidos |
+| Encode | 1080p30, < 33 ms/frame | ✅ 59,5 fps, 15,9 ms p50 (Quick Sync) |
+| Transporte | entrega íntegra, RTT baixo | ✅ 0,061 ms p50 em 127.0.0.1 |
+| Latência captura→exibição | estável, sem deriva | ✅ 16,5 ms p50 / 21 ms p99, 1360×768 |
+| Latência glass-to-glass | < 80 ms na LAN | ⬜ **falta** — exige o protocolo com câmera |
+| Banda, tela parada | < 100 kbps | ⚠️ 123 kbps; keyframe periódico domina |
+| Banda, vídeo em tela cheia | < 8 Mbps | ✅ 1,95 Mbps |
+| CPU no host | < 15% de um core | ⬜ não medido |
+
+### Orçamento por frame, medido a 1360×768
+
+```
+leitura da GPU   4,1 ms   ← maior item; é o desvio que a decisão D3 elimina
+BGRA → NV12      1,9 ms   ← idem
+encode           4,5 ms
+```
+
+Os dois primeiros somam 6 ms que a pipeline definitiva não deveria gastar: a
+textura sai da GPU e volta para ela logo em seguida. A 1080p esse desperdício
+mais que dobra.
+
+> **Achado da etapa 4 que altera o design:** cada estágio passou isolado, e a
+> integração ainda assim falhou. Sem pacing nem descarte, a latência crescia
+> sem limite — 283 ms, 1021 ms, 1473 ms, 2075 ms, 2910 ms em doze segundos. O
+> host codificava a 58 fps enquanto o viewer exibia 49, e a diferença virava
+> fila. Numa tela remota, **descartar é melhor que atrasar**: o host respeita o
+> alvo de fps e para quando a fila de saída passa de 512 KB; o viewer
+> decodifica tudo (H.264 é interdependente) mas exibe só o quadro mais recente.
+> Com isso a latência ficou estável em 16,5 ms.
 
 > **Achado da etapa 3 que altera o design:** um laço de espera com
 > `sleep(200 µs)` custou 1,27 ms de RTT em 127.0.0.1; com `yield_now`, 0,061 ms.

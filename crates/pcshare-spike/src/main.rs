@@ -12,17 +12,19 @@
 //! que o monitor leva para acendê-lo. O protocolo com cronômetro e câmera, em
 //! `docs/SPRINT-0.md`, continua sendo a medida que vale.
 
+mod input;
 mod window;
 
 use std::collections::VecDeque;
 use std::net::TcpListener;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use pcshare_capture::{CaptureError, DesktopCapture};
 use pcshare_codec::convert::{bgra_to_nv12, nv12_to_bgra};
 use pcshare_codec::{H264Decoder, H264Encoder};
-use pcshare_core::{Channel, Message, TcpTransport, Transport};
+use pcshare_core::{Channel, InputEvent, Message, TcpTransport, Transport};
 use windows::core::w;
 
 const FPS: u32 = 30;
@@ -37,6 +39,15 @@ const BACKLOG_LIMIT: usize = 512 * 1024;
 /// Base de tempo comum. Só faz sentido no modo de processo único.
 static START: OnceLock<Instant> = OnceLock::new();
 
+/// Somente visualização: o host recebe e contabiliza os eventos, mas não os
+/// injeta.
+///
+/// Não é só chave de teste. É requisito de produto por dois motivos: em modo
+/// loopback a injeção realimenta a própria janela e deixa o cursor errático,
+/// e uma sessão de suporte que só observa é o padrão mínimo de privacidade
+/// para quem está do outro lado.
+static VIEW_ONLY: AtomicBool = AtomicBool::new(false);
+
 fn now_us() -> i64 {
     START.get_or_init(Instant::now).elapsed().as_micros() as i64
 }
@@ -44,6 +55,11 @@ fn now_us() -> i64 {
 fn main() {
     START.get_or_init(Instant::now);
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    if args.iter().any(|a| a == "--view-only") {
+        VIEW_ONLY.store(true, Ordering::SeqCst);
+        println!("modo somente visualização: entrada não será injetada");
+    }
 
     match args.first().map(String::as_str) {
         Some("host") => {
@@ -122,9 +138,12 @@ fn run_host(mut t: TcpTransport) -> Result<(), Box<dyn std::error::Error>> {
                     let m = Message::Pong { nonce, sent_us };
                     t.send(m.channel(), &m.encode())?;
                 }
-                // A etapa 6 injeta de verdade; aqui só contamos, para provar
-                // que o canal de volta está vivo.
-                Ok(Message::Input(_)) => stats.input_events += 1,
+                Ok(Message::Input(ev)) => {
+                    if !VIEW_ONLY.load(Ordering::Relaxed) {
+                        input::inject(&ev, w, h);
+                    }
+                    stats.input_events += 1;
+                }
                 Ok(_) | Err(_) => {}
             }
         }
@@ -227,7 +246,7 @@ impl HostStats {
     fn report(&mut self, t: &TcpTransport) {
         println!(
             "host: {} frames | leitura GPU {:.2} ms | BGRA→NV12 {:.2} ms | encode {:.2} ms \
-             | {:.2} Mbps | fila {} KB | ritmo {} desc {}{}",
+             | {:.2} Mbps | fila {} KB | ritmo {} desc {}{}{}",
             self.frames,
             med(&mut self.readback_ms),
             med(&mut self.convert_ms),
@@ -236,6 +255,19 @@ impl HostStats {
             t.pending_out() / 1024,
             self.paced,
             self.dropped,
+            if self.input_events > 0 {
+                format!(
+                    " | entrada {}{}",
+                    self.input_events,
+                    if VIEW_ONLY.load(Ordering::Relaxed) {
+                        " (não injetada)"
+                    } else {
+                        ""
+                    }
+                )
+            } else {
+                String::new()
+            },
             if self.access_lost > 0 {
                 format!(" | sessões perdidas {}", self.access_lost)
             } else {
@@ -278,6 +310,7 @@ fn run_viewer(mut t: TcpTransport) {
     let mut rgb = Vec::new();
     let mut frames = 0u64;
     let mut stale = 0u64;
+    let mut sent_input = 0u64;
     let mut latency_ms: Vec<f64> = Vec::new();
     let mut pending_time: VecDeque<i64> = VecDeque::new();
     let mut next_report = Instant::now() + Duration::from_secs(2);
@@ -285,6 +318,35 @@ fn run_viewer(mut t: TcpTransport) {
 
     while win.pump() {
         let mut got_any = false;
+
+        // ---- entrada do usuário, de volta para o host
+        let (cw, ch) = win.client_size();
+        for raw in win.take_input() {
+            let ev = match raw {
+                // A janela quase nunca tem o tamanho da tela remota. Mapear
+                // pela proporção é o que faz o cursor pousar onde o usuário
+                // apontou, e não deslocado.
+                window::RawEvent::Move { x, y } => {
+                    if cw <= 0 || ch <= 0 {
+                        continue;
+                    }
+                    InputEvent::MouseMove {
+                        x: (x as i64 * w as i64 / cw as i64) as i32,
+                        y: (y as i64 * h as i64 / ch as i64) as i32,
+                    }
+                }
+                window::RawEvent::Button { button, down } => {
+                    InputEvent::MouseButton { button, down }
+                }
+                window::RawEvent::Wheel { delta } => InputEvent::MouseWheel { delta },
+                window::RawEvent::Key { scancode, down } => InputEvent::Key { scancode, down },
+            };
+            let m = Message::Input(ev);
+            if t.send(m.channel(), &m.encode()).is_err() {
+                return;
+            }
+            sent_input += 1;
+        }
 
         loop {
             match t.poll() {
@@ -341,7 +403,7 @@ fn run_viewer(mut t: TcpTransport) {
         if Instant::now() >= next_report {
             latency_ms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             println!(
-                "viewer: {frames} exibidos, {stale} obsoletos descartados \
+                "viewer: {frames} exibidos, {stale} obsoletos, {sent_input} eventos enviados \
                  | captura→exibição p50 {:.1} ms  p99 {:.1} ms",
                 pct(&latency_ms, 0.50),
                 pct(&latency_ms, 0.99),
