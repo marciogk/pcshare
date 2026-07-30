@@ -8,9 +8,11 @@
 use windows::Win32::Foundation::{HMODULE, RECT};
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
-    ID3D11DeviceContext,
+    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ,
+    D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
 };
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{
     DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_DESC, DXGI_OUTDUPL_FRAME_INFO,
     IDXGIDevice, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
@@ -66,8 +68,13 @@ pub struct FrameStats {
 
 pub struct DesktopCapture {
     device: ID3D11Device,
-    _context: ID3D11DeviceContext,
+    context: ID3D11DeviceContext,
     duplication: IDXGIOutputDuplication,
+    /// Textura em memória acessível pela CPU. Criada uma vez e reaproveitada:
+    /// alocar por frame no caminho quente seria desperdício puro.
+    staging: Option<ID3D11Texture2D>,
+    /// Textura do frame atualmente retido, se houver.
+    current: Option<ID3D11Texture2D>,
     desc: DXGI_OUTDUPL_DESC,
     output_index: u32,
     /// Reutilizado entre frames: a API pede um buffer nosso, e alocar a cada
@@ -106,8 +113,10 @@ impl DesktopCapture {
 
             Ok(Self {
                 device,
-                _context: context,
+                context,
                 duplication,
+                staging: None,
+                current: None,
                 desc,
                 output_index,
                 dirty_buf: Vec::new(),
@@ -140,10 +149,13 @@ impl DesktopCapture {
     /// Recria a sessão após `CaptureError::AccessLost`, reaproveitando o device.
     pub fn recover(&mut self) -> Result<(), CaptureError> {
         self.frame_held = false;
+        self.current = None;
         unsafe {
             self.duplication = Self::duplicate_output(&self.device, self.output_index)?;
             self.desc = self.duplication.GetDesc();
         }
+        // A resolução pode ter mudado — foi um dos motivos da perda de sessão.
+        self.staging = None;
         Ok(())
     }
 
@@ -153,6 +165,7 @@ impl DesktopCapture {
         unsafe {
             // A API exige liberar o frame anterior antes de pedir o próximo.
             if self.frame_held {
+                self.current = None;
                 self.duplication.ReleaseFrame()?;
                 self.frame_held = false;
             }
@@ -169,6 +182,7 @@ impl DesktopCapture {
                 Err(e) => return Err(e.into()),
             }
             self.frame_held = true;
+            self.current = resource.and_then(|r| r.cast::<ID3D11Texture2D>().ok());
 
             // LastPresentTime zerado: o desktop não foi redesenhado, apenas o
             // cursor se moveu. Emitir vídeo aqui seria banda desperdiçada.
@@ -195,6 +209,79 @@ impl DesktopCapture {
                 dirty_pixels,
                 mouse_only,
             }))
+        }
+    }
+
+    /// Copia o frame retido para `out` em BGRA, uma linha por `width()*4`
+    /// bytes.
+    ///
+    /// **Este é o gargalo que a decisão D3 manda eliminar no produto.** A
+    /// textura está na GPU; trazê-la para a CPU custa uma cópia da tela
+    /// inteira por frame e serializa GPU e CPU. Existe aqui porque o encoder
+    /// do Sprint 0 recebe NV12 em memória de sistema. O caminho definitivo
+    /// entrega a textura direto ao encoder, sem passar pela CPU.
+    ///
+    /// Devolve `Ok(false)` se não há frame retido.
+    pub fn copy_bgra(&mut self, out: &mut Vec<u8>) -> Result<bool, CaptureError> {
+        let Some(src) = self.current.clone() else {
+            return Ok(false);
+        };
+        let (w, h) = (self.width() as usize, self.height() as usize);
+
+        unsafe {
+            let staging = self.ensure_staging()?;
+            self.context.CopyResource(&staging, &src);
+
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            self.context
+                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+
+            let row_bytes = w * 4;
+            out.resize(row_bytes * h, 0);
+
+            // O passo de linha da GPU quase nunca é igual à largura útil: o
+            // driver alinha as linhas. Copiar em bloco único embaralharia a
+            // imagem em qualquer resolução não alinhada.
+            let pitch = mapped.RowPitch as usize;
+            let base = mapped.pData as *const u8;
+            for y in 0..h {
+                std::ptr::copy_nonoverlapping(
+                    base.add(y * pitch),
+                    out.as_mut_ptr().add(y * row_bytes),
+                    row_bytes,
+                );
+            }
+
+            self.context.Unmap(&staging, 0);
+        }
+        Ok(true)
+    }
+
+    unsafe fn ensure_staging(&mut self) -> Result<ID3D11Texture2D, CaptureError> {
+        unsafe {
+            if let Some(s) = &self.staging {
+                return Ok(s.clone());
+            }
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: self.width(),
+                Height: self.height(),
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_STAGING,
+                BindFlags: 0,
+                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                MiscFlags: 0,
+            };
+            let mut tex: Option<ID3D11Texture2D> = None;
+            self.device.CreateTexture2D(&desc, None, Some(&mut tex))?;
+            let tex = tex.expect("CreateTexture2D retornou Ok sem textura");
+            self.staging = Some(tex.clone());
+            Ok(tex)
         }
     }
 

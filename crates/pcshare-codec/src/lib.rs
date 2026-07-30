@@ -14,6 +14,11 @@
 //! passar pela CPU. A leitura de volta da GPU é custo real e **não** está
 //! medida aqui — este módulo mede o encoder isoladamente.
 
+pub mod convert;
+pub mod decoder;
+
+pub use decoder::{DecodedFrame, H264Decoder};
+
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 use std::sync::Once;
@@ -25,7 +30,7 @@ use windows::core::{GUID, Interface, PWSTR, Result};
 
 static MF_INIT: Once = Once::new();
 
-fn ensure_mf_started() {
+pub(crate) fn ensure_mf_started() {
     MF_INIT.call_once(|| unsafe {
         // RPC_E_CHANGED_MODE é aceitável: significa que a thread já estava em
         // apartamento COM diferente, o que não impede o Media Foundation.
@@ -36,7 +41,7 @@ fn ensure_mf_started() {
 
 /// Empacota dois u32 no formato que os atributos do MF esperam
 /// (dimensões, taxa de quadros e proporção de pixel).
-fn pack(high: u32, low: u32) -> u64 {
+pub(crate) fn pack(high: u32, low: u32) -> u64 {
     ((high as u64) << 32) | (low as u64)
 }
 
@@ -404,7 +409,7 @@ unsafe fn tune_rate_control(transform: &IMFTransform, fps: u32) -> Vec<&'static 
     }
 }
 
-unsafe fn make_sample(nv12: &[u8], time: i64, duration: i64) -> Result<IMFSample> {
+pub(crate) unsafe fn make_sample(nv12: &[u8], time: i64, duration: i64) -> Result<IMFSample> {
     unsafe {
         let buffer = MFCreateMemoryBuffer(nv12.len() as u32)?;
         let mut ptr: *mut u8 = std::ptr::null_mut();
@@ -423,13 +428,30 @@ unsafe fn make_sample(nv12: &[u8], time: i64, duration: i64) -> Result<IMFSample
 
 unsafe fn find_encoder(backend: Backend) -> Result<(IMFTransform, String)> {
     unsafe {
+        find_transform(
+            MFT_CATEGORY_VIDEO_ENCODER,
+            MFVideoFormat_NV12,
+            MFVideoFormat_H264,
+            backend,
+        )
+    }
+}
+
+/// Localiza e ativa um MFT que converta `in_subtype` em `out_subtype`.
+pub(crate) unsafe fn find_transform(
+    category: GUID,
+    in_subtype: GUID,
+    out_subtype: GUID,
+    backend: Backend,
+) -> Result<(IMFTransform, String)> {
+    unsafe {
         let input = MFT_REGISTER_TYPE_INFO {
             guidMajorType: MFMediaType_Video,
-            guidSubtype: MFVideoFormat_NV12,
+            guidSubtype: in_subtype,
         };
         let output = MFT_REGISTER_TYPE_INFO {
             guidMajorType: MFMediaType_Video,
-            guidSubtype: MFVideoFormat_H264,
+            guidSubtype: out_subtype,
         };
 
         let flags = match backend {
@@ -440,7 +462,7 @@ unsafe fn find_encoder(backend: Backend) -> Result<(IMFTransform, String)> {
         let mut activates: *mut Option<IMFActivate> = std::ptr::null_mut();
         let mut count: u32 = 0;
         MFTEnumEx(
-            MFT_CATEGORY_VIDEO_ENCODER,
+            category,
             MFT_ENUM_FLAG(flags),
             Some(&input),
             Some(&output),
@@ -451,7 +473,7 @@ unsafe fn find_encoder(backend: Backend) -> Result<(IMFTransform, String)> {
         if count == 0 || activates.is_null() {
             return Err(windows::core::Error::new(
                 MF_E_TOPO_CODEC_NOT_FOUND,
-                "nenhum encoder H.264 disponível para este backend",
+                "nenhum MFT disponível para este backend",
             ));
         }
 
@@ -480,13 +502,13 @@ unsafe fn find_encoder(backend: Backend) -> Result<(IMFTransform, String)> {
         match chosen {
             Some(v) => Ok(v),
             None => Err(last_err.unwrap_or_else(|| {
-                windows::core::Error::new(MF_E_TOPO_CODEC_NOT_FOUND, "nenhum encoder ativou")
+                windows::core::Error::new(MF_E_TOPO_CODEC_NOT_FOUND, "nenhum MFT ativou")
             })),
         }
     }
 }
 
-unsafe fn friendly_name(activate: &IMFActivate) -> String {
+pub(crate) unsafe fn friendly_name(activate: &IMFActivate) -> String {
     unsafe {
         let mut pw = PWSTR::null();
         let mut len: u32 = 0;

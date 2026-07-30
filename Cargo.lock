@@ -21,6 +21,16 @@ name = "pcshare-core"
 version = "0.0.1"
 
 [[package]]
+name = "pcshare-spike"
+version = "0.0.1"
+dependencies = [
+ "pcshare-capture",
+ "pcshare-codec",
+ "pcshare-core",
+ "windows",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"

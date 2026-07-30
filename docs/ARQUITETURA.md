@@ -157,7 +157,7 @@ apresentação, cada estágio que espera por relógio em vez de evento doa mais 
 
 ## Riscos não-técnicos com impacto em arquitetura
 
-### R1 — Assinatura de código
+### R1 — Assinatura de código  ⚠️ JÁ OBSERVADO
 
 Sem certificado, o SmartScreen bloqueia a instalação e antivírus dão
 falso-positivo. Custo recorrente (OV ~R$1.500–3.000/ano; EV mais caro, mas
@@ -165,6 +165,23 @@ dispensa a reputação acumulada).
 
 Consequência de arquitetura: número de binários assinados deve ser mínimo, e a
 cadeia de atualização automática precisa validar assinatura.
+
+> **Aconteceu na etapa 4, na máquina de desenvolvimento.** O
+> `pcshare-spike.exe` rodou uma vez e, na recompilação seguinte, foi bloqueado:
+> *"Uma política de Controle de Aplicativo bloqueou este arquivo"*. A máquina
+> tem **Smart App Control em imposição**
+> (`HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy` →
+> `VerifiedAndReputablePolicyState = 1`).
+>
+> Isto eleva R1 de incômodo a **restrição de entrada no mercado**. O Smart App
+> Control vem ligado por padrão em instalações limpas de Windows 11 e bloqueia
+> executáveis sem assinatura confiável ou reputação acumulada — exatamente o
+> perfil de um produto novo de acesso remoto. O cliente que mais precisa da
+> instalação simples é justamente o de máquina nova.
+>
+> A verificar antes de definir preço e prazo de lançamento: se um certificado
+> OV basta ou se o EV é obrigatório para passar pelo Smart App Control, e
+> quanto tempo leva para acumular reputação a partir do zero.
 
 ### R2 — Abuso por golpistas (mercado brasileiro)
 
