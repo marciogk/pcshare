@@ -16,9 +16,13 @@ Mais importante: a **Fase 3** (UAC e tela de bloqueio) exige instalar um
 serviço do Windows. Um serviço não assinado não passa pelo Smart App Control.
 Sem resolver isto, a próxima fase não começa.
 
-**Antes de fazer, entenda:** desligar é **irreversível**. O Windows não permite
-religar; só uma reinstalação limpa do sistema o traz de volta. Numa máquina de
-desenvolvimento costuma valer a pena, mas a decisão é sua.
+**Sobre reverter:** a documentação da Microsoft descreve o desligamento como
+definitivo — religar exigiria reinstalação limpa. **Não foi o comportamento
+observado aqui:** em 30/07/2026, nesta build 26200, o recurso foi desligado e
+depois religado pela mesma interface, sem reinstalar nada e sem reiniciar.
+
+Trate a irreversibilidade como possível, não como certa. Se a máquina for de
+uso pessoal, decida como se fosse definitivo.
 
 **Como:**
 

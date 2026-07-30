@@ -50,9 +50,13 @@ Verificar (PowerShell, qualquer usuário):
 Para desligar: Segurança do Windows → Controle de aplicativo e navegador →
 Configurações de Controle Inteligente de Aplicativos → Desativado → **reiniciar**.
 
-> ⚠️ **É irreversível.** O Windows não permite religar; só reinstalação limpa.
-> Numa máquina de desenvolvimento costuma valer a pena; numa máquina de uso
-> pessoal, avalie.
+> ⚠️ A Microsoft documenta o desligamento como **definitivo**. Na prática, em
+> 30/07/2026 nesta build 26200, foi possível religar pela mesma interface sem
+> reinstalar nem reiniciar. Trate como possivelmente irreversível.
+
+**Antes de desligar, tente sem.** Binários já executados antes costumam ganhar
+reputação local e passar mesmo com o SAC ligado. O bloqueio atinge sobretudo
+executáveis recém-compilados, com hash inédito.
 
 ### 2. Rede e firewall — na máquina que será o **host**
 
