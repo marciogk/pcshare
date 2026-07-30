@@ -1,0 +1,26 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "UNLICENSED"
+publish = false
+
+[profile.release]
+# O caminho do vídeo é sensível a latência: otimizar agressivamente e
+# permitir inline entre crates. lto = "fat" custa tempo de build, mas as
+# medições do Sprint 0 só valem se forem feitas em release.
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+[profile.dev]
+# Sem isto, a captura e o encode ficam lentos demais em debug para que
+# qualquer medição faça sentido. Otimiza dependências mantendo o nosso
+# código depurável.
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
