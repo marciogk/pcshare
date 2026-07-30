@@ -1,131 +1,119 @@
-# Próximos passos — guia prático
+# Próximos passos
 
-O que depende de ação manual. Atualizado em 30/07/2026.
+Atualizado em 30/07/2026, ao encerrar a sessão de testes.
 
-Só restam **duas** coisas. Tudo o mais já foi feito ou automatizado.
-
----
-
-## 1. Desligar o Smart App Control  🔴 trava a próxima fase
-
-**Por que:** o Windows avalia cada executável recém-compilado e às vezes o
-bloqueia com *"Uma política de Controle de Aplicativo bloqueou este arquivo"*.
-Já derrubou a suíte de testes duas vezes e impediu uma verificação.
-
-Mais importante: a **Fase 3** (UAC e tela de bloqueio) exige instalar um
-serviço do Windows. Um serviço não assinado não passa pelo Smart App Control.
-Sem resolver isto, a próxima fase não começa.
-
-**Sobre reverter:** a documentação da Microsoft descreve o desligamento como
-definitivo — religar exigiria reinstalação limpa. **Não foi o comportamento
-observado aqui:** em 30/07/2026, nesta build 26200, o recurso foi desligado e
-depois religado pela mesma interface, sem reinstalar nada e sem reiniciar.
-
-Trate a irreversibilidade como possível, não como certa. Se a máquina for de
-uso pessoal, decida como se fosse definitivo.
-
-**Como:**
-
-1. Tecla Windows → digite `Segurança do Windows` → Enter
-2. Menu da esquerda → **Controle de aplicativo e navegador**
-3. **Configurações de Controle Inteligente de Aplicativos**
-4. Marque **Desativado** e confirme
-5. **Reinicie o computador**
-
-**Confirmar** — no PowerShell, deve responder `0`:
-
-```powershell
-(Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy").VerifiedAndReputablePolicyState
-```
+**O Sprint 0 está completo.** Todos os critérios foram atingidos, incluindo a
+etapa 5 entre duas máquinas em rede real. Os resultados estão em
+[SPRINT-0.md](SPRINT-0.md).
 
 ---
 
-## 2. Etapa 5 — testar entre duas máquinas  🟢 precisa de um segundo PC
+## Como retomar os testes
 
-**Por que:** tudo até aqui rodou em `127.0.0.1`, que não tem rede de verdade —
-sem perda de pacotes, sem limite de banda, sem firewall. É justamente onde os
-defeitos de transporte não aparecem.
+Nada precisa ser reconfigurado. O que já está feito e **permanece**:
 
-**O que você precisa:** um segundo PC com Windows na mesma rede.
+| Item | Estado |
+|---|---|
+| Rede `Ethernet` como Privada | ✅ persiste entre reinícios |
+| Regra de firewall `PCShare spike` (UDP 7000) | ✅ persiste |
+| `pcshare.exe` no notebook | ✅ em `C:\Pcshare\` |
+| Identidade das duas máquinas | ✅ em `%LOCALAPPDATA%\PCShare\` |
 
-### Na máquina que será controlada (host)
+O único cuidado: **o Smart App Control está ligado** neste PC. Binários já
+executados passam; um recém-compilado pode ser bloqueado.
 
-Descubra o IP **da placa de rede real** — ignore adaptadores de Hyper-V,
-VirtualBox ou WSL:
+### Retomar em três comandos
+
+**1. Neste PC (host):**
 
 ```powershell
-Get-NetIPAddress -AddressFamily IPv4 |
-  Where-Object { $_.InterfaceAlias -notmatch 'vEthernet|WSL|Loopback' } |
-  Select-Object InterfaceAlias, IPAddress
+cd "c:\Projeto Pcshare"
+.\target\release\pcshare-spike.exe host 0.0.0.0:7000 --view-only --password 482913
 ```
 
-Copie a pasta `target\release\` para essa máquina e rode:
+**2. Confirme o IP** — pode ter mudado por DHCP:
 
 ```powershell
-.\pcshare-spike.exe host 0.0.0.0:7000
+(Get-NetIPAddress -AddressFamily IPv4 | Where-Object InterfaceAlias -eq 'Ethernet').IPAddress
 ```
 
-Ele imprime o **ID**, a **senha da sessão** e a **impressão digital**. Anote os
-três.
-
-Se o Windows perguntar sobre o firewall, **permita em redes privadas**. Se não
-perguntar e a conexão falhar, num PowerShell **como administrador**:
+**3. No notebook, em `C:\Pcshare\`:**
 
 ```powershell
-New-NetFirewallRule -DisplayName "PCShare spike" -Direction Inbound `
-  -Protocol UDP -LocalPort 7000 -Action Allow -Profile Private
+.\pcshare.exe viewer 192.168.15.3:7000 --password 482913 --view-only
 ```
 
-> Note: **UDP**, não TCP. O transporte agora é QUIC.
+> **Uma sessão por vez.** O host aceita uma conexão e para de escutar. Para
+> reconectar, encerre o host e inicie de novo. Se der `timed out`, quase sempre
+> é isto — não é problema de rede.
 
-### Na máquina que vai controlar (viewer)
-
-```powershell
-.\pcshare-spike.exe viewer 192.168.0.15:7000 --password 482913
-```
-
-Troque pelo IP e pela senha exibidos no host. Confira se a impressão digital
-que o viewer mostra é igual à do host — é isso que detecta intermediação.
-
-> ⚠️ **Sem `--view-only`, o mouse e o teclado controlam a outra máquina de
-> verdade.** É o comportamento pretendido, mas só faça numa máquina sua e à
-> qual consiga voltar fisicamente.
-
-### O que anotar
-
-- A latência reportada fica estável ou volta a crescer?
-- Aparece `desc` (descartes por contrapressão) maior que zero?
-- Quantos Mbps na rede real?
-- Algum erro de protocolo no terminal?
-
----
-
-## Já resolvido — não precisa mais fazer
-
-- ~~Conferir os `.h264` no VLC~~ — verificado gravando um quadro decodificado
-  como imagem e conferindo diretamente.
-- ~~Medir glass-to-glass com câmera~~ — o modo `latencia` estima sozinho,
-  fechando o laço pela própria tela. Resultado: 53,6 ms medidos, **64 a 79 ms**
-  estimados de glass-to-glass, dentro da meta de 80 ms.
-  A foto com celular ainda serve se quiser um número oficial, mas hoje ela
-  confirmaria uma estimativa em vez de produzir o primeiro dado.
-- ~~Medir CPU~~ — 7,3% de um núcleo, 63 MB de RAM.
+### Verificações rápidas, se algo falhar
 
 ```powershell
-# Medições que rodam sozinhas, quando quiser repetir
-.\target\release\pcshare-spike.exe latencia 30
-.\target\release\pcshare-spike.exe latencia-captura 40
+# o host está escutando?
+Get-NetUDPEndpoint -LocalPort 7000
+
+# a regra de firewall continua lá?
+Get-NetFirewallRule -DisplayName "PCShare spike" | Select-Object Enabled, Action
+
+# a rede ainda é Privada?
+Get-NetConnectionProfile | Select-Object InterfaceAlias, NetworkCategory
 ```
 
 ---
 
-## Decisão de negócio ainda em aberto
+## O que ficou pendente
 
-Duas, e nenhuma é técnica:
+### 1. Confirmar a origem das duas impressões digitais 🟡
 
-1. **O nicho.** Está indefinido desde o primeiro dia. Afeta que recursos
+As duas sessões reportaram identidades diferentes para o que se supunha ser a
+mesma máquina. O código está descartado como causa — o teste de recarga da
+identidade passa e o arquivo foi confirmado no disco.
+
+Para confirmar, **no notebook**:
+
+```powershell
+.\pcshare.exe host 0.0.0.0:7001 --password 1
+```
+
+Ele imprime o ID e a impressão digital **dele mesmo**; depois `Ctrl+C`.
+
+- Se for `8D:62:14:DD:B8:58:C7:DC` → a sessão longa veio de outra máquina
+  (provavelmente a de `192.168.0.249`), e não há defeito.
+- Se for `B4:84:8F:1D:8D:E9:5F:45` → há algo a investigar.
+
+### 2. Teste de controle remoto real 🟢
+
+Tudo foi testado com `--view-only`, que impede a injeção de mouse e teclado.
+Falta rodar **sem** essa opção nas duas pontas, para ver o controle funcionando.
+
+> Só faça numa máquina à qual consiga voltar fisicamente.
+
+### 3. Reconexão automática 🔴 defeito conhecido
+
+O host aceita uma sessão e para de escutar. Num produto isso é inaceitável: se
+a conexão cair, o usuário teria que reiniciar o programa na máquina remota —
+exatamente a que ele não alcança. Precisa voltar a escutar após o fim de uma
+sessão.
+
+---
+
+## Próximo marco técnico
+
+**Fase 3 — arquitetura serviço + agente**, para funcionar durante prompts de
+UAC e na tela de bloqueio. É o maior risco de cronograma restante e o que
+separa um protótipo de um produto de suporte remoto.
+
+Exige elevação de privilégio e, muito provavelmente, desligar o Smart App
+Control aqui — um serviço não assinado dificilmente passa.
+
+---
+
+## Decisões de negócio em aberto
+
+1. **O nicho de mercado.** Indefinido desde o primeiro dia. Afeta que recursos
    priorizar depois da Fase 3.
-2. **Certificado de assinatura de código.** Um **OV** basta para passar pelo
-   Smart App Control, ou o **EV** é obrigatório? Quanto tempo leva para
-   acumular reputação partindo do zero? Isso afeta preço e data de lançamento.
-   Ver risco R1 em [ARQUITETURA.md](ARQUITETURA.md).
+2. **Certificado de assinatura.** Um **OV** basta para passar pelo Smart App
+   Control, ou o **EV** é obrigatório? Quanto tempo leva para acumular
+   reputação partindo do zero? Afeta preço e data de lançamento. Ver risco R1
+   em [ARQUITETURA.md](ARQUITETURA.md).

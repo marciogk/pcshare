@@ -76,6 +76,7 @@ de produto, e display virtual é como a concorrência resolve isso.
 | Latência captura→exibição | estável, sem deriva | ✅ 16,8 ms p50 — **mede só parte do caminho** |
 | Latência tela→exibição | — | ✅ **53,6 ms p50** a 60 fps |
 | Latência glass-to-glass | < 80 ms na LAN | ✅ estimada em **64 a 79 ms** |
+| Etapa 5, duas máquinas | funcionar em rede real | ✅ ver abaixo |
 | Banda, uso leve (IDE aberta) | — | 0,69 Mbps |
 | Banda, tela parada | < 100 kbps | ⬜ **não mensurável aqui** — ver abaixo |
 | Banda, vídeo em tela cheia | < 8 Mbps | ✅ 1,90 Mbps |
@@ -119,6 +120,50 @@ supressão por área alterada.
 Adotado GOP de 30 s, escolhido por medição e não por intuição. Sobreponível com
 `PCSHARE_GOP` para nova varredura em outro hardware — este resultado é de uma
 Intel HD 4600 com driver antigo e não deve ser generalizado.
+
+### Etapa 5 — resultado em rede real (30/07/2026)
+
+Duas máquinas na mesma LAN: host em `192.168.15.3` (Windows 11, i7-4790, HD
+4600), viewer em `192.168.15.6` (Windows 10, notebook). Duas sessões, uma de
+22 minutos e outra de 7.
+
+| Métrica | Loopback | **Rede real** |
+|---|---|---|
+| RTT do canal de controle, p50 | 5,6–6,9 ms | **8,4–12,3 ms** |
+| RTT, p99 | 6,5–8,9 ms | **16,2–22,8 ms** |
+| **Descartes por contrapressão** | 0 | **0** |
+| Fila de saída, pico | 0 KB | 23 KB |
+| Banda | 0,5–0,9 Mbps | 0,26–0,37 Mbps |
+| CPU do host | 7,3% | **2,4–3,3%** de um núcleo |
+| RAM do host | — | 60 MB |
+| Quadros na sessão longa | — | 16.267 |
+
+A rede acrescentou ~4 ms ao RTT, o esperado para uma ida e volta em LAN.
+
+**O `desc 0` é o resultado que mais importa.** Em loopback ele era zero por
+construção — não há perda nem limite de banda. Sobre rede real, atravessando um
+roteador, continuou zero em 29 minutos somados. A contrapressão implementada na
+etapa 4 nunca precisou agir.
+
+Também confirmado: **`entrada 236` no host e `236 eventos` no viewer**, número
+idêntico. O canal de volta funciona ponta a ponta, cifrado, entre identidades
+distintas — host `54:34:16:…`, viewer com identidade própria.
+
+### Pendências que a etapa 5 revelou
+
+1. **O host aceita uma única sessão.** Depois que alguém conecta, ele sai do
+   modo de escuta. Se a conexão cair, seria preciso reiniciar o programa na
+   máquina remota — justamente a que não se alcança. Limitação séria para o
+   produto.
+2. **Impressões digitais divergentes entre as duas sessões**
+   (`B4:84:8F:…` e `8D:62:14:…`). O teste
+   `identidade_recarregada_do_disco_e_a_mesma` passa e o arquivo de identidade
+   foi confirmado como persistido e recarregado, o que descarta defeito na
+   derivação. A hipótese em aberto é que as sessões vieram de **máquinas
+   diferentes** — provavelmente uma terceira máquina em `192.168.0.249`, atrás
+   de outro roteador, cujo tráfego de saída passa por NAT mesmo com o ping
+   falhando. Isso também explicaria o timeout inicial do notebook: a vaga única
+   de sessão já estava ocupada. **Não confirmado.**
 
 ### A latência real é muito maior que a medida internamente
 
