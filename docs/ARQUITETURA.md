@@ -284,6 +284,31 @@ cadeia de atualização automática precisa validar assinatura.
 > OV basta ou se o EV é obrigatório para passar pelo Smart App Control, e
 > quanto tempo leva para acumular reputação a partir do zero.
 
+**Desligar o Smart App Control é solução de bancada, não do produto.** Vale a
+pena ser explícito porque a leitura contrária inviabilizaria o negócio: nenhum
+cliente vai mexer em configuração de segurança, e o cliente típico de suporte
+remoto é justamente quem não saberia fazê-lo.
+
+O que enfrentamos em desenvolvimento é o pior caso possível — binário sem
+assinatura, reputação zero (cada `cargo build` gera um hash inédito) e
+comportamento de captura de tela mais injeção de entrada. O bloqueio é o
+sistema funcionando como projetado.
+
+| | desenvolvimento | produto |
+|---|---|---|
+| binário | recompilado a toda hora, hash novo | release assinado, hash estável |
+| solução | desligar o SAC nas nossas máquinas | certificado de assinatura |
+| máquina do cliente | — | **SAC continua ligado** |
+
+A concorrência instala normalmente em máquinas com SAC ativo porque distribui
+binários assinados. É custo, não impedimento.
+
+> **Ressalva para um recurso futuro.** Se o suporte a *host headless* (máquina
+> sem monitor) for implementado com driver de display virtual, driver é outro
+> patamar de assinatura: exige atestação ou WHQL pelo portal de parceiros da
+> Microsoft — processo mais caro e mais demorado que assinar um executável.
+> Considerar antes de prometer o recurso.
+
 ### R2 — Abuso por golpistas (mercado brasileiro)
 
 Acesso remoto é o vetor principal do golpe do falso suporte no Brasil.
