@@ -307,6 +307,14 @@ fn run_viewer(mut t: TcpTransport) {
         }
     };
 
+    // `--dump-frame <arquivo.bmp>`: grava o primeiro quadro decodificado e sai.
+    let dump_to: Option<String> = {
+        let a: Vec<String> = std::env::args().collect();
+        a.iter()
+            .position(|x| x == "--dump-frame")
+            .and_then(|i| a.get(i + 1).cloned())
+    };
+
     let mut rgb = Vec::new();
     let mut frames = 0u64;
     let mut stale = 0u64;
@@ -397,6 +405,17 @@ fn run_viewer(mut t: TcpTransport) {
             if first {
                 println!("viewer: primeira imagem na tela");
                 first = false;
+
+                // Verificação visual do ida-e-volta completo. Contadores de
+                // fps provam que a pipeline *corre*; só olhar um quadro prova
+                // que ela corre com a imagem certa.
+                if let Some(path) = dump_to.as_deref() {
+                    match save_bmp(path, &rgb, f.width as i32, f.height as i32) {
+                        Ok(()) => println!("viewer: quadro gravado em {path}"),
+                        Err(e) => eprintln!("viewer: falha ao gravar {path}: {e}"),
+                    }
+                    return;
+                }
             }
         }
 
@@ -432,6 +451,32 @@ fn wait_hello(t: &mut TcpTransport) -> Option<(u32, u32)> {
         }
     }
     None
+}
+
+/// Grava BGRA como BMP de 32 bits. Formato escolhido por ser o único que se
+/// escreve sem dependência: cabeçalho fixo e pixels crus, sem compressão.
+fn save_bmp(path: &str, bgra: &[u8], w: i32, h: i32) -> std::io::Result<()> {
+    let pixels = (w as usize) * (h as usize) * 4;
+    let mut f = Vec::with_capacity(54 + pixels);
+
+    f.extend_from_slice(b"BM");
+    f.extend_from_slice(&((54 + pixels) as u32).to_le_bytes());
+    f.extend_from_slice(&0u32.to_le_bytes());
+    f.extend_from_slice(&54u32.to_le_bytes());
+
+    f.extend_from_slice(&40u32.to_le_bytes());
+    f.extend_from_slice(&w.to_le_bytes());
+    // Altura negativa: linhas de cima para baixo, como o buffer está. Sem
+    // isso a imagem sai invertida.
+    f.extend_from_slice(&(-h).to_le_bytes());
+    f.extend_from_slice(&1u16.to_le_bytes());
+    f.extend_from_slice(&32u16.to_le_bytes());
+    f.extend_from_slice(&0u32.to_le_bytes());
+    f.extend_from_slice(&(pixels as u32).to_le_bytes());
+    f.extend_from_slice(&[0u8; 16]);
+
+    f.extend_from_slice(&bgra[..pixels.min(bgra.len())]);
+    std::fs::write(path, f)
 }
 
 fn ms(since: Instant) -> f64 {
