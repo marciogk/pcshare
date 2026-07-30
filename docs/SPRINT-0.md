@@ -76,6 +76,11 @@ de produto, e display virtual é como a concorrência resolve isso.
 | Banda, tela parada | < 100 kbps | contador de bytes no transporte |
 | Banda, vídeo em tela cheia | < 8 Mbps | contador de bytes no transporte |
 
+> **Achado da etapa 3 que altera o design:** um laço de espera com
+> `sleep(200 µs)` custou 1,27 ms de RTT em 127.0.0.1; com `yield_now`, 0,061 ms.
+> O Windows não honra sleeps de sub-milissegundo. Ver decisão D8 — a saída não é
+> spin, é espera bloqueante em evento.
+
 > **Achado da etapa 1 que altera o design:** com o desktop ocioso, a captura
 > registrou **zero timeouts** — algo redesenha 60 vezes por segundo, ainda que
 > numa área ínfima (0,3% da tela). A suposição "tela parada, banda zero" não se

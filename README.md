@@ -23,21 +23,26 @@ pcshare-viewer    lado controlador
 
 | Ferramenta | Status |
 |---|---|
-| Rust (rustup) | ⬜ a instalar |
-| Git | ⬜ a instalar |
+| Rust | ✅ 1.97.1 |
+| VS Build Tools + Windows SDK | ✅ 17.14 (o linker `link.exe` não vem com o rustup) |
+| Git | ✅ 2.55.0 |
 | Node.js | ✅ v26.5.0 (para o servidor de sinalização, Fase 2) |
 | Python | ✅ 3.14.3 (ferramentas internas apenas) |
 
-Instalação:
+Reinstalação num ambiente limpo:
 
 ```powershell
 winget install Git.Git
 winget install Rustlang.Rustup
+winget install Microsoft.VisualStudio.2022.BuildTools --override `
+  "--wait --quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
 ```
 
-Após instalar, abra um terminal novo (o PATH precisa recarregar) e confirme:
+## Benchmarks do Sprint 0
 
 ```powershell
-git --version
-cargo --version
+cargo test                                              # protocolo e transporte
+cargo run --release -p pcshare-capture --bin bench       # etapa 1: captura
+cargo run --release -p pcshare-codec  --bin encbench     # etapa 2: encoder
+cargo run --release -p pcshare-core   --bin linkbench    # etapa 3: transporte
 ```

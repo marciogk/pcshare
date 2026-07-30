@@ -133,6 +133,26 @@ Mas isso sozinho **não** protege contra MITM feito pelo próprio servidor de
 sinalização. É necessário verificar a chave pública do peer fora da banda —
 modelo ID + senha, com fingerprint fixado no primeiro pareamento.
 
+### D8 — Esperar por evento, nunca por relógio
+
+Nenhum laço do caminho de vídeo ou de input pode usar `thread::sleep` para
+aguardar trabalho. Só espera bloqueante em evento: `AcquireNextFrame` da
+captura, `GetEvent` do MFT, leitura bloqueante ou IOCP no socket.
+
+**Medido na etapa 3:** um laço com `sleep(200 µs)` produziu RTT de 1,27 ms em
+127.0.0.1; o mesmo laço com `yield_now` produziu 0,061 ms. Fator de 21. O
+Windows não honra sleeps de sub-milissegundo — o pedido de 200 µs virou mais de
+1 ms de espera real.
+
+Num orçamento de 80 ms atravessando captura, encode, rede, decode e
+apresentação, cada estágio que espera por relógio em vez de evento doa mais de
+1 ms para nada.
+
+> **Não use spin como solução.** `yield_now` num laço queima um núcleo, e
+> "cliente leve" é requisito de produto (decisão D1). O spin serviu para
+> *medir* o custo do sleep, não para eliminá-lo. A resposta é espera
+> bloqueante.
+
 ---
 
 ## Riscos não-técnicos com impacto em arquitetura
