@@ -74,8 +74,8 @@ de produto, e display virtual é como a concorrência resolve isso.
 | Transporte isolado | entrega íntegra, RTT baixo | ✅ 0,061 ms p50 em 127.0.0.1 |
 | RTT do input sob carga de vídeo | responsivo | ✅ 10–15 ms p50 |
 | Latência captura→exibição | estável, sem deriva | ✅ 16,8 ms p50 — **mede só parte do caminho** |
-| Latência tela→exibição | — | ⚠️ **68 a 83 ms p50** — ver abaixo |
-| Latência glass-to-glass | < 80 ms na LAN | ⚠️ estimada em **79 a 106 ms**; não atingida |
+| Latência tela→exibição | — | ✅ **53,6 ms p50** a 60 fps |
+| Latência glass-to-glass | < 80 ms na LAN | ✅ estimada em **64 a 79 ms** |
 | Banda, uso leve (IDE aberta) | — | 0,69 Mbps |
 | Banda, tela parada | < 100 kbps | ⬜ **não mensurável aqui** — ver abaixo |
 | Banda, vídeo em tela cheia | < 8 Mbps | ✅ 1,90 Mbps |
@@ -131,27 +131,36 @@ esperamos essa troca reaparecer num quadro decodificado, percorrendo
 **descarga na tela → compositor do Windows → captura DXGI → encode → rede →
 decode**:
 
-| Taxa | p50 | mín | p99 |
+Decompondo com os dois cronômetros no mesmo evento, e comparando com a captura
+medida isoladamente (modo `latencia-captura`, sem encoder nem rede):
+
+| | tela → captura | captura → decodificação | total |
 |---|---|---|---|
-| 30 fps | 81,5 ms | 66,3 ms | 97,8 ms |
-| **60 fps** | **68,6 ms** | **46,6 ms** | 103,4 ms |
+| 30 fps | 76,2 ms | 7,4 ms | 83,5 ms |
+| 60 fps, antes | 60,0 ms | 6,7 ms | 66,7 ms |
+| **60 fps, depois** | **43,4 ms** | 10,2 ms | **53,6 ms** |
+| *captura isolada* | *33,6 ms* | — | — |
 
-Somando a apresentação no viewer e a resposta física dos monitores (10 a 25 ms,
-fora do alcance de qualquer software), o glass-to-glass fica entre **79 e
-106 ms**. A meta de 80 ms **não está atingida**.
+Duas conclusões, e nenhuma era o palpite inicial.
 
-O que se sabe sobre a composição desse tempo, a 60 fps:
+**A pipeline não é o gargalo.** Encode, rede e decode somam 7 a 10 ms. O resto
+é o caminho até o quadro chegar às nossas mãos. Continuar otimizando codec ou
+transporte rende quase nada.
 
-- compositor do Windows, ~17 ms — inevitável
-- ritmo de captura, ~8 ms em média — foi o que a mudança para 60 fps cortou
-- encode, 3,6 ms — medido
-- **~30 ms ainda não atribuídos** — suspeitos: buffer interno do decodificador
-  e atraso da própria Desktop Duplication em relação à composição
+**Mas 26 ms daquele trecho eram nossos.** A captura isolada custa 33,6 ms; no
+pipeline o mesmo trecho marcava 60 ms. A diferença era um **batimento no
+controle de ritmo**: a comparação exata `elapsed < period` descartava o quadro
+que chegasse meio milissegundo adiantado, e o próximo só viria um intervalo
+inteiro depois. Um jitter de 0,5 ms custava 16,7 ms. Uma tolerância de
+`period/8` recuperou 17 ms.
 
-A conclusão que importa: **a pipeline não é o gargalo**. Encode a 3,6 ms e
-transporte a menos de 1 ms somam pouco perto do que o sistema operacional
-impõe. Otimizar codec ou rede daqui para frente rende pouco; o ganho está em
-descobrir os 30 ms restantes.
+Restam ~10 ms nossos, provavelmente por segurar o quadro do DXGI durante o
+encode. O piso do sistema — DWM mais Desktop Duplication — é **33,6 ms** e não
+depende de nós.
+
+Com a apresentação no viewer e a resposta física dos monitores (10 a 25 ms,
+fora do alcance de software), o glass-to-glass estimado é de **64 a 79 ms**,
+dentro da meta.
 
 ### Orçamento por frame, medido a 1360×768
 

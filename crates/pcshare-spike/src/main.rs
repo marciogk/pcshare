@@ -1,15 +1,15 @@
 ﻿//! Sprint 0, etapa 4: a pipeline inteira, ponta a ponta.
 //!
-//! captura DXGI â†’ BGRA â†’ NV12 â†’ H.264 â†’ TCP â†’ H.264 â†’ NV12 â†’ BGRA â†’ janela
+//! captura DXGI → BGRA → NV12 → H.264 → TCP → H.264 → NV12 → BGRA → janela
 //!
 //!     cargo run --release -p pcshare-spike               # tudo em 127.0.0.1
 //!     cargo run --release -p pcshare-spike -- host 0.0.0.0:7000
 //!     cargo run --release -p pcshare-spike -- viewer 192.168.0.10:7000
 //!
-//! O modo padrÃ£o roda host e viewer no mesmo processo, o que permite medir a
-//! latÃªncia interna com um relÃ³gio sÃ³. Esse nÃºmero **nÃ£o** Ã© glass-to-glass:
-//! ele ignora o tempo que o compositor leva para pÃ´r o pixel no monitor e o
-//! que o monitor leva para acendÃª-lo. O protocolo com cronÃ´metro e cÃ¢mera, em
+//! O modo padrão roda host e viewer no mesmo processo, o que permite medir a
+//! latência interna com um relógio só. Esse número **não** é glass-to-glass:
+//! ele ignora o tempo que o compositor leva para pôr o pixel no monitor e o
+//! que o monitor leva para acendê-lo. O protocolo com cronômetro e câmera, em
 //! `docs/SPRINT-0.md`, continua sendo a medida que vale.
 
 mod input;
@@ -32,46 +32,53 @@ use pcshare_core::{
 };
 use windows::core::w;
 
-/// Taxa alvo. SobreponÃ­vel por `PCSHARE_FPS` para experimentaÃ§Ã£o: o ritmo Ã©
-/// suspeito de dominar a latÃªncia, jÃ¡ que uma mudanÃ§a espera em mÃ©dia meio
-/// intervalo sÃ³ pela vez dela.
+/// Taxa alvo, sobreponível por `PCSHARE_FPS`.
+///
+/// 60 e não 30, por medição: a 30 fps uma mudança espera em média meio
+/// intervalo só pela vez dela, e a latência medida caiu de 66,7 para 53,6 ms
+/// ao dobrar o alvo. O custo foi desprezível — CPU de 6,9% para 7,3% de um
+/// núcleo, banda comparável.
+///
+/// Na prática o valor funciona como teto: o encoder satura em torno de
+/// 40 fps nesta máquina, e o laço simplesmente roda o mais rápido que
+/// consegue.
 fn fps() -> u32 {
     std::env::var("PCSHARE_FPS")
         .ok()
         .and_then(|v| v.parse().ok())
         .filter(|v| (1..=120).contains(v))
-        .unwrap_or(30)
+        .unwrap_or(60)
 }
 const BITRATE: u32 = 8_000_000;
-/// Espera mÃ¡xima por um frame novo. Ã‰ espera bloqueante em evento (decisÃ£o
-/// D8), mas limitada para que o mesmo laÃ§o tambÃ©m atenda o transporte.
+/// Espera máxima por um frame novo. É espera bloqueante em evento (decisão
+/// D8), mas limitada para que o mesmo laço também atenda o transporte.
 const CAPTURE_TIMEOUT_MS: u32 = 8;
-/// Acima deste acÃºmulo na fila de saÃ­da, o host para de codificar atÃ© o link
-/// escoar. Meio megabyte a 3 Mbps jÃ¡ representa mais de um segundo de atraso.
+/// Acima deste acúmulo na fila de saída, o host para de codificar até o link
+/// escoar. Meio megabyte a 3 Mbps já representa mais de um segundo de atraso.
 const BACKLOG_LIMIT: usize = 512 * 1024;
 
-/// Base de tempo comum. SÃ³ faz sentido no modo de processo Ãºnico.
+/// Base de tempo comum. Só faz sentido no modo de processo único.
 static START: OnceLock<Instant> = OnceLock::new();
 
-/// Somente visualizaÃ§Ã£o: o host recebe e contabiliza os eventos, mas nÃ£o os
+/// Somente visualização: o host recebe e contabiliza os eventos, mas não os
 /// injeta.
 ///
-/// NÃ£o Ã© sÃ³ chave de teste. Ã‰ requisito de produto por dois motivos: em modo
-/// loopback a injeÃ§Ã£o realimenta a prÃ³pria janela e deixa o cursor errÃ¡tico,
-/// e uma sessÃ£o de suporte que sÃ³ observa Ã© o padrÃ£o mÃ­nimo de privacidade
-/// para quem estÃ¡ do outro lado.
+/// Não é só chave de teste. É requisito de produto por dois motivos: em modo
+/// loopback a injeção realimenta a própria janela e deixa o cursor errático,
+/// e uma sessão de suporte que só observa é o padrão mínimo de privacidade
+/// para quem está do outro lado.
 static VIEW_ONLY: AtomicBool = AtomicBool::new(false);
 
 /// Host e viewer no mesmo processo, portanto com a mesma base de tempo.
 ///
-/// SÃ³ nesse caso a latÃªncia capturaâ†’exibiÃ§Ã£o significa alguma coisa: o
-/// carimbo do host e o relÃ³gio do viewer saem do mesmo `Instant`. Em
-/// processos separados â€” e mais ainda em mÃ¡quinas separadas â€” subtrair um do
-/// outro produz lixo, e jÃ¡ produziu: âˆ’2073 ms numa mediÃ§Ã£o real, que era
-/// exatamente a diferenÃ§a entre os instantes de inÃ­cio dos dois processos.
+/// Só nesse caso a latência captura→exibição significa alguma coisa: o
+/// carimbo do host e o relógio do viewer saem do mesmo `Instant`. Em
+/// processos separados — e mais ainda em máquinas separadas — subtrair um do
+/// outro produz lixo, e já produziu: −2073 ms numa medição real, que era
+/// exatamente a diferença entre os instantes de início dos dois processos.
 static SAME_PROCESS: AtomicBool = AtomicBool::new(false);
 
-/// Cala os relatÃ³rios periÃ³dicos do host. Na mediÃ§Ã£o de latÃªncia eles
+/// Cala os relatórios periódicos do host. Na medição de latência eles
 /// atropelariam a linha de progresso.
 static QUIET: AtomicBool = AtomicBool::new(false);
 
@@ -85,13 +92,13 @@ fn main() {
 
     if args.iter().any(|a| a == "--view-only") {
         VIEW_ONLY.store(true, Ordering::SeqCst);
-        println!("modo somente visualizaÃ§Ã£o: entrada nÃ£o serÃ¡ injetada");
+        println!("modo somente visualização: entrada não será injetada");
     }
 
-    // `--sem-cripto` mantÃ©m o caminho em texto claro para comparaÃ§Ã£o de
-    // custo. Nunca deve existir num binÃ¡rio distribuÃ­do.
+    // `--sem-cripto` mantém o caminho em texto claro para comparação de
+    // custo. Nunca deve existir num binário distribuído.
     let plaintext = args.iter().any(|a| a == "--sem-cripto");
-    // `--tcp` volta ao transporte antigo, para comparaÃ§Ã£o.
+    // `--tcp` volta ao transporte antigo, para comparação.
     let quic = !args.iter().any(|a| a == "--tcp");
 
     match args.first().map(String::as_str) {
@@ -100,14 +107,14 @@ fn main() {
             let identity = load_identity().expect("identidade");
             let password = arg_value("--password").unwrap_or_else(secure::random_password);
 
-            println!("\n  ID desta mÃ¡quina : {}", identity.display_id());
-            println!("  Senha da sessÃ£o  : {password}");
-            println!("  ImpressÃ£o digital: {}\n", identity.fingerprint());
+            println!("\n  ID desta máquina : {}", identity.display_id());
+            println!("  Senha da sessão  : {password}");
+            println!("  Impressão digital: {}\n", identity.fingerprint());
 
             println!("host aguardando viewer em {bind} ({})", transporte(quic));
             let result = if quic {
                 let listener =
-                    QuicListener::bind(bind.parse().expect("endereÃ§o invÃ¡lido")).expect("bind");
+                    QuicListener::bind(bind.parse().expect("endereço inválido")).expect("bind");
                 let t = listener.accept().expect("accept falhou");
                 servir(t, &identity, &password, plaintext)
             } else {
@@ -139,13 +146,17 @@ fn main() {
             println!("viewer conectando a {addr} ({})", transporte(quic));
 
             if quic {
-                let t = QuicTransport::connect(addr.parse().expect("endereÃ§o invÃ¡lido"))
+                let t = QuicTransport::connect(addr.parse().expect("endereço inválido"))
                     .expect("connect falhou");
                 assistir(t, &identity, &password, plaintext);
             } else {
                 let t = TcpTransport::connect(&addr).expect("connect falhou");
                 assistir(t, &identity, &password, plaintext);
             }
+        }
+        Some("latencia-captura") => {
+            let amostras: usize = args.get(1).and_then(|v| v.parse().ok()).unwrap_or(30);
+            run_capture_latency(amostras);
         }
         Some("latencia") => {
             let amostras: usize = args
@@ -158,7 +169,7 @@ fn main() {
     }
 }
 
-// ------------------------------------------------- mediÃ§Ã£o de latÃªncia
+// ------------------------------------------------- medição de latência
 
 /// Onde o marcador fica na tela, e de que tamanho.
 const MARK_X: i32 = 24;
@@ -167,25 +178,130 @@ const MARK_SIZE: i32 = 96;
 /// Luma acima disto conta como branco. Preto fica perto de 16, branco de 235.
 const LUMA_LIMIAR: u8 = 128;
 
-/// Mede a latÃªncia que os cronÃ´metros internos nÃ£o enxergam.
+/// Mede **só** o trecho tela → captura DXGI, sem encoder, rede nem
+/// decodificador.
 ///
-/// Os 16,8 ms medidos atÃ© aqui iam da captura atÃ© a entrega dos pixels ao
-/// Windows. Faltava o compositor â€” e ele nÃ£o Ã© pequeno.
+/// Existe para separar duas explicações muito diferentes para os ~60 ms que a
+/// decomposição atribuiu a esse trecho:
 ///
-/// O truque Ã© fechar o laÃ§o pela prÃ³pria tela: um marcador muda de cor, e
-/// esperamos essa mudanÃ§a reaparecer num quadro **decodificado**. O caminho
-/// percorrido Ã© descarga na tela â†’ compositor â†’ captura DXGI â†’ encode â†’ rede â†’
+/// - se o Windows for o responsável (composição do DWM mais a latência
+///   própria da Desktop Duplication), o piso é do sistema e o produto tem
+///   pouco a fazer;
+/// - se for o laço do host — ritmo, supressão, espera — é nosso e dá para
+///   consertar.
+///
+/// Aqui não há laço de host: pinta e pergunta à captura, direto.
+fn run_capture_latency(amostras: usize) {
+    println!("PCShare — latência só da captura (sem encoder, rede ou decode)");
+    println!("Não mexa no mouse nem cubra o quadrado.\n");
+
+    let mut cap = match DesktopCapture::new(0) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("falha ao abrir a captura: {e}");
+            return;
+        }
+    };
+    let (w, h) = (cap.width() as usize, cap.height() as usize);
+    let mut marcador = match window::MarkerWindow::new(MARK_X, MARK_Y, MARK_SIZE) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("falha ao criar o marcador: {e}");
+            return;
+        }
+    };
+
+    let sx = (MARK_X + MARK_SIZE / 2) as usize;
+    let sy = (MARK_Y + MARK_SIZE / 2) as usize;
+    let mut bgra = Vec::new();
+    let mut medidas: Vec<f64> = Vec::with_capacity(amostras);
+    let mut alvo_branco = true;
+    let mut t0: Option<Instant> = None;
+
+    marcador.paint(false);
+    let assentar = Instant::now() + Duration::from_millis(400);
+    let limite = Instant::now() + Duration::from_secs(60);
+
+    while medidas.len() < amostras && Instant::now() < limite {
+        marcador.pump();
+
+        match cap.next_frame(50) {
+            Ok(Some(_)) => {}
+            Ok(None) => continue,
+            Err(CaptureError::AccessLost) => {
+                let _ = cap.recover();
+                continue;
+            }
+            Err(e) => {
+                eprintln!("erro na captura: {e}");
+                return;
+            }
+        }
+        if !cap.copy_bgra(&mut bgra).unwrap_or(false) {
+            continue;
+        }
+        if Instant::now() < assentar {
+            continue;
+        }
+
+        // BGRA: basta um canal para distinguir preto de branco.
+        let idx = (sy * w + sx) * 4;
+        let Some(&azul) = bgra.get(idx) else { continue };
+        let esta_branco = azul > LUMA_LIMIAR;
+
+        match t0 {
+            None => {
+                alvo_branco = !esta_branco;
+                marcador.paint(alvo_branco);
+                t0 = Some(Instant::now());
+            }
+            Some(inicio) => {
+                if esta_branco == alvo_branco {
+                    medidas.push(inicio.elapsed().as_secs_f64() * 1000.0);
+                    t0 = None;
+                }
+            }
+        }
+    }
+
+    let _ = h;
+    if medidas.len() < 3 {
+        eprintln!("amostras insuficientes ({})", medidas.len());
+        return;
+    }
+    medidas.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    println!("\n{:=<56}", "");
+    println!("TELA → CAPTURA DXGI  ({} amostras)", medidas.len());
+    println!("{:=<56}", "");
+    println!(
+        "  p50 {:.1} ms   p90 {:.1} ms   mín {:.1} ms   máx {:.1} ms",
+        pct(&medidas, 0.50),
+        pct(&medidas, 0.90),
+        medidas[0],
+        medidas[medidas.len() - 1],
+    );
+    println!("\n  Só DWM + Desktop Duplication. Nada do nosso laço de host.");
+}
+
+/// Mede a latência que os cronômetros internos não enxergam.
+///
+/// Os 16,8 ms medidos até aqui iam da captura até a entrega dos pixels ao
+/// Windows. Faltava o compositor — e ele não é pequeno.
+///
+/// O truque é fechar o laço pela própria tela: um marcador muda de cor, e
+/// esperamos essa mudança reaparecer num quadro **decodificado**. O caminho
+/// percorrido é descarga na tela → compositor → captura DXGI → encode → rede →
 /// decode.
 ///
-/// **O que ainda falta para ser glass-to-glass de verdade:** a apresentaÃ§Ã£o
-/// final no viewer e o tempo de resposta fÃ­sico dos monitores, que nenhum
-/// software alcanÃ§a. Some algo entre 10 e 25 ms ao resultado para estimar o
-/// nÃºmero que a pessoa sente â€” ou meÃ§a com cÃ¢mera, como descrito em
+/// **O que ainda falta para ser glass-to-glass de verdade:** a apresentação
+/// final no viewer e o tempo de resposta físico dos monitores, que nenhum
+/// software alcança. Some algo entre 10 e 25 ms ao resultado para estimar o
+/// número que a pessoa sente — ou meça com câmera, como descrito em
 /// `docs/PROXIMOS-PASSOS.md`.
 fn run_latency(amostras: usize) {
     QUIET.store(true, Ordering::SeqCst);
-    println!("PCShare â€” mediÃ§Ã£o de latÃªncia pelo compositor");
-    println!("NÃ£o mexa no mouse nem cubra o quadrado no canto superior esquerdo.\n");
+    println!("PCShare — medição de latência pelo compositor");
+    println!("Não mexa no mouse nem cubra o quadrado no canto superior esquerdo.\n");
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind falhou");
     let addr = listener.local_addr().unwrap();
@@ -196,7 +312,7 @@ fn run_latency(amostras: usize) {
 
     let mut t = TcpTransport::connect(addr).expect("connect falhou");
     let Some((w, h)) = wait_hello(&mut t) else {
-        eprintln!("conexÃ£o encerrada antes do Hello");
+        eprintln!("conexão encerrada antes do Hello");
         return;
     };
     let mut dec = match H264Decoder::new(w, h, fps()) {
@@ -212,13 +328,13 @@ fn run_latency(amostras: usize) {
     let mut marcador = match window::MarkerWindow::new(MARK_X, MARK_Y, MARK_SIZE) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("nÃ£o foi possÃ­vel criar o marcador: {e}");
+            eprintln!("não foi possível criar o marcador: {e}");
             return;
         }
     };
 
-    // Amostra o centro do marcador, longe das bordas â€” a compressÃ£o suaviza
-    // transiÃ§Ãµes bruscas, e o miolo do quadrado Ã© o ponto mais confiÃ¡vel.
+    // Amostra o centro do marcador, longe das bordas — a compressão suaviza
+    // transições bruscas, e o miolo do quadrado é o ponto mais confiável.
     let sx = (MARK_X + MARK_SIZE / 2) as usize;
     let sy = (MARK_Y + MARK_SIZE / 2) as usize;
     if sx >= w as usize || sy >= h as usize {
@@ -226,7 +342,11 @@ fn run_latency(amostras: usize) {
         return;
     }
 
+    // Duas medidas do mesmo evento. A diferença entre elas isola o trecho
+    // anterior à captura — compositor e ritmo — do trecho da nossa pipeline.
     let mut medidas: Vec<f64> = Vec::with_capacity(amostras);
+    let mut pipeline: Vec<f64> = Vec::with_capacity(amostras);
+    let mut capturas: VecDeque<i64> = VecDeque::new();
     let mut esperando_branco = true;
     let mut flip_em: Option<Instant> = None;
     marcador.paint(false);
@@ -241,32 +361,37 @@ fn run_latency(amostras: usize) {
         loop {
             match t.poll() {
                 Ok(Some((_, payload))) => {
-                    if let Ok(Message::Video { data, .. }) = Message::decode(&payload) {
+                    if let Ok(Message::Video { data, time_us, .. }) = Message::decode(&payload) {
+                        capturas.push_back(time_us);
                         let _ = dec.decode(&data, 0);
                     }
                 }
                 Ok(None) => break,
                 Err(e) => {
-                    eprintln!("conexÃ£o encerrada ({e})");
+                    eprintln!("conexão encerrada ({e})");
                     return;
                 }
             }
         }
 
         for f in dec.take_frames() {
+            // O decodificador preserva a ordem, então o carimbo mais antigo
+            // pendente é o deste quadro.
+            let capturado_us = capturas.pop_front();
+
             let idx = sy * f.width as usize + sx;
             let Some(&luma) = f.data.get(idx) else { continue };
             let esta_branco = luma > LUMA_LIMIAR;
 
-            // Espera a tela assentar antes de comeÃ§ar a cronometrar.
+            // Espera a tela assentar antes de começar a cronometrar.
             if Instant::now() < estabilizou_ate {
                 continue;
             }
 
             match flip_em {
-                // Ocioso: o alvo Ã© sempre o oposto do que estÃ¡ na tela agora.
-                // Derivar do estado observado, e nÃ£o de um alvo guardado, Ã© o
-                // que garante progresso â€” a primeira versÃ£o comparava os dois
+                // Ocioso: o alvo é sempre o oposto do que está na tela agora.
+                // Derivar do estado observado, e não de um alvo guardado, é o
+                // que garante progresso — a primeira versão comparava os dois
                 // e travava assim que coincidiam.
                 None => {
                     esperando_branco = !esta_branco;
@@ -276,6 +401,9 @@ fn run_latency(amostras: usize) {
                 Some(t0) => {
                     if esta_branco == esperando_branco {
                         medidas.push(t0.elapsed().as_secs_f64() * 1000.0);
+                        if let Some(cap) = capturado_us {
+                            pipeline.push((now_us() - cap) as f64 / 1000.0);
+                        }
                         flip_em = None;
                         print!("\r  {} de {amostras} amostras ", medidas.len());
                         use std::io::Write;
@@ -298,16 +426,30 @@ fn run_latency(amostras: usize) {
     medidas.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let p50 = pct(&medidas, 0.50);
     println!("\n{:=<58}", "");
-    println!("LATÃŠNCIA ATÃ‰ O QUADRO DECODIFICADO  ({} amostras)", medidas.len());
+    println!("LATÊNCIA ATÉ O QUADRO DECODIFICADO  ({} amostras)", medidas.len());
     println!("{:=<58}", "");
-    println!("  p50 {:.1} ms   p99 {:.1} ms   mÃ­n {:.1} ms   mÃ¡x {:.1} ms",
+    println!("  p50 {:.1} ms   p99 {:.1} ms   mín {:.1} ms   máx {:.1} ms",
         p50,
         pct(&medidas, 0.99),
         medidas[0],
         medidas[medidas.len() - 1],
     );
-    println!("\n  Inclui: compositor do Windows, captura, encode, rede, decode.");
-    println!("  Falta : apresentaÃ§Ã£o no viewer e resposta fÃ­sica do monitor.");
+    if !pipeline.is_empty() {
+        pipeline.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let pipe50 = pct(&pipeline, 0.50);
+        println!("\n  DECOMPOSIÇÃO (p50)");
+        println!(
+            "    tela → captura DXGI : {:>6.1} ms   compositor + ritmo",
+            p50 - pipe50
+        );
+        println!(
+            "    captura → decodific.: {:>6.1} ms   encode + rede + decode",
+            pipe50
+        );
+        println!("    {:-<44}", "");
+        println!("    total               : {p50:>6.1} ms");
+    }
+    println!("\n  Falta: apresentação no viewer e resposta física do monitor.");
     println!("\n  Estimativa glass-to-glass: {:.0} a {:.0} ms", p50 + 10.0, p50 + 25.0);
     println!("  Meta do Sprint 0: abaixo de 80 ms.");
 }
@@ -316,7 +458,7 @@ fn run_loopback() {
     SAME_PROCESS.store(true, Ordering::SeqCst);
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind falhou");
     let addr = listener.local_addr().unwrap();
-    println!("PCShare â€” Sprint 0, etapa 4: pipeline completa em {addr}");
+    println!("PCShare — Sprint 0, etapa 4: pipeline completa em {addr}");
     println!("Feche a janela para encerrar.\n");
 
     std::thread::spawn(move || {
@@ -332,10 +474,10 @@ fn run_loopback() {
 
 // ---------------------------------------------------------------- host
 
-/// Carrega a identidade da mÃ¡quina, criando na primeira execuÃ§Ã£o.
+/// Carrega a identidade da máquina, criando na primeira execução.
 ///
-/// Precisa persistir: o ID que a pessoa dita por telefone Ã© derivado da chave
-/// pÃºblica, entÃ£o gerar uma nova a cada inÃ­cio trocaria o ID da mÃ¡quina e
+/// Precisa persistir: o ID que a pessoa dita por telefone é derivado da chave
+/// pública, então gerar uma nova a cada início trocaria o ID da máquina e
 /// invalidaria qualquer pareamento anterior.
 fn load_identity() -> Result<Identity, Box<dyn std::error::Error>> {
     let dir = std::path::PathBuf::from(
@@ -354,8 +496,8 @@ fn load_identity() -> Result<Identity, Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&dir)?;
     std::fs::write(&path, id.private_key())?;
     println!("identidade criada em {}", path.display());
-    // TODO(Fase 3): a chave fica em texto claro no perfil do usuÃ¡rio. O
-    // produto precisa protegÃª-la com DPAPI e permissÃµes restritas.
+    // TODO(Fase 3): a chave fica em texto claro no perfil do usuário. O
+    // produto precisa protegê-la com DPAPI e permissões restritas.
     Ok(id)
 }
 
@@ -363,7 +505,7 @@ fn transporte(quic: bool) -> &'static str {
     if quic { "QUIC" } else { "TCP" }
 }
 
-/// Handshake do lado do host e entrada no laÃ§o de captura.
+/// Handshake do lado do host e entrada no laço de captura.
 fn servir<T: Transport>(
     t: T,
     identity: &Identity,
@@ -371,33 +513,33 @@ fn servir<T: Transport>(
     plaintext: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if plaintext {
-        eprintln!("AVISO: sessÃ£o SEM criptografia");
+        eprintln!("AVISO: sessão SEM criptografia");
         return run_host(t);
     }
     let sec = secure::accept(t, identity, password)?;
-    println!("host: sessÃ£o cifrada com {}", sec.remote_fingerprint());
+    println!("host: sessão cifrada com {}", sec.remote_fingerprint());
     run_host(sec)
 }
 
-/// Handshake do lado do viewer e entrada no laÃ§o de exibiÃ§Ã£o.
+/// Handshake do lado do viewer e entrada no laço de exibição.
 fn assistir<T: Transport>(t: T, identity: &Identity, password: &str, plaintext: bool) {
     if plaintext {
-        eprintln!("AVISO: sessÃ£o SEM criptografia");
+        eprintln!("AVISO: sessão SEM criptografia");
         run_viewer(t);
         return;
     }
     match secure::connect(t, identity, password) {
         Ok(sec) => {
-            // Conferir esta impressÃ£o com quem estÃ¡ do outro lado Ã© o que
-            // fecha o buraco de intermediaÃ§Ã£o â€” o servidor de sinalizaÃ§Ã£o da
-            // Fase 2 nÃ£o Ã© confiÃ¡vel por natureza.
+            // Conferir esta impressão com quem está do outro lado é o que
+            // fecha o buraco de intermediação — o servidor de sinalização da
+            // Fase 2 não é confiável por natureza.
             println!(
-                "viewer: host autenticado, impressÃ£o {}",
+                "viewer: host autenticado, impressão {}",
                 sec.remote_fingerprint()
             );
             run_viewer(sec);
         }
-        Err(e) => eprintln!("viewer: nÃ£o foi possÃ­vel autenticar ({e})"),
+        Err(e) => eprintln!("viewer: não foi possível autenticar ({e})"),
     }
 }
 
@@ -407,8 +549,8 @@ fn arg_value(nome: &str) -> Option<String> {
 }
 
 fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
-    // `--cpu-path` forÃ§a o caminho antigo (leitura da GPU + conversÃ£o na CPU),
-    // para comparaÃ§Ã£o A/B com o caminho sem cÃ³pia.
+    // `--cpu-path` força o caminho antigo (leitura da GPU + conversão na CPU),
+    // para comparação A/B com o caminho sem cópia.
     let force_cpu = std::env::args().any(|a| a == "--cpu-path");
 
     let gpu = GpuContext::new()?;
@@ -423,9 +565,9 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
     };
     println!("host: encoder [{}] ({})", enc.name(), enc.tuning().join(", "));
 
-    // O conversor na GPU sÃ³ entra se o encoder aceitar texturas. Encoder de
-    // software e driver antigo caem no caminho por memÃ³ria de sistema, e Ã©
-    // melhor perder desempenho do que nÃ£o funcionar.
+    // O conversor na GPU só entra se o encoder aceitar texturas. Encoder de
+    // software e driver antigo caem no caminho por memória de sistema, e é
+    // melhor perder desempenho do que não funcionar.
     let mut conv = match enc.is_gpu_direct() {
         true => Some(pcshare_gpu::Nv12Converter::new(gpu.clone(), w, h)?),
         false => None,
@@ -433,9 +575,9 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "host: caminho de pixels = {}",
         if conv.is_some() {
-            "GPU direto (sem cÃ³pia)"
+            "GPU direto (sem cópia)"
         } else {
-            "memÃ³ria de sistema (leitura da GPU + conversÃ£o na CPU)"
+            "memória de sistema (leitura da GPU + conversão na CPU)"
         }
     );
 
@@ -495,31 +637,38 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => return Err(e.into()),
         };
 
-        // Nada mudou de fato: nem pixels novos, nem regiÃµes deslocadas.
+        // Nada mudou de fato: nem pixels novos, nem regiões deslocadas.
         //
-        // Esta Ã© a supressÃ£o que o achado da etapa 1 exigiu. O compositor
+        // Esta é a supressão que o achado da etapa 1 exigiu. O compositor
         // entrega frames a 60 Hz mesmo com o desktop ocioso, e medimos na
-        // etapa 2 que numa tela imÃ³vel o encoder gasta banda refinando
-        // qualidade sozinho. A resposta nÃ£o Ã© ajustar o encoder â€” Ã© nÃ£o
-        // chamÃ¡-lo.
+        // etapa 2 que numa tela imóvel o encoder gasta banda refinando
+        // qualidade sozinho. A resposta não é ajustar o encoder — é não
+        // chamá-lo.
         if !frame.has_changes() {
             stats.skipped += 1;
             t.flush()?;
             continue;
         }
 
-        // A captura entrega a 60 Hz; o alvo Ã© 30. Sem esta trava o host
-        // produz o dobro do que o viewer consome, e a diferenÃ§a nÃ£o vira
-        // fluidez â€” vira fila, e fila vira latÃªncia.
-        if last_encoded.elapsed() < frame_period {
+        // Controle de ritmo, com tolerância — e a tolerância não é detalhe.
+        //
+        // A captura entrega a 60 Hz e o alvo pode ser 60. Uma comparação
+        // exata (`elapsed < period`) descartava o quadro que chegasse meio
+        // milissegundo adiantado, e o próximo só viria um intervalo inteiro
+        // depois: um jitter de 0,5 ms custava 16,7 ms de latência.
+        //
+        // Medido: o trecho tela→captura marcava 60 ms na pipeline contra
+        // 33,6 ms na captura isolada. A diferença era quase toda este
+        // batimento.
+        if last_encoded.elapsed() + frame_period / 8 < frame_period {
             stats.paced += 1;
             t.flush()?;
             continue;
         }
 
-        // ContrapressÃ£o. Se o link nÃ£o escoou o que jÃ¡ mandamos, mandar mais
-        // sÃ³ afunda a latÃªncia. Numa tela remota, **descartar Ã© melhor que
-        // atrasar**: ninguÃ©m quer ver o que a tela era hÃ¡ dois segundos.
+        // Contrapressão. Se o link não escoou o que já mandamos, mandar mais
+        // só afunda a latência. Numa tela remota, **descartar é melhor que
+        // atrasar**: ninguém quer ver o que a tela era há dois segundos.
         if t.pending_out() > BACKLOG_LIMIT {
             stats.dropped += 1;
             t.flush()?;
@@ -530,7 +679,7 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
         let captured_us = now_us();
 
         if let Some(conv) = conv.as_mut() {
-            // Caminho sem cÃ³pia: a textura nunca sai da memÃ³ria de vÃ­deo.
+            // Caminho sem cópia: a textura nunca sai da memória de vídeo.
             let Some(src) = cap.current_texture() else {
                 continue;
             };
@@ -560,7 +709,7 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
         for p in enc.take_packets() {
             let m = Message::Video {
                 seq,
-                // Carimbo do instante da *captura*, nÃ£o do envio: Ã© ele que
+                // Carimbo do instante da *captura*, não do envio: é ele que
                 // permite ao viewer medir a travessia inteira.
                 time_us: captured_us,
                 is_keyframe: p.is_keyframe,
@@ -585,9 +734,9 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
 struct HostStats {
     frames: u64,
     skipped: u64,
-    /// Descartados por pacing: a captura vinha mais rÃ¡pido que o alvo.
+    /// Descartados por pacing: a captura vinha mais rápido que o alvo.
     paced: u64,
-    /// Descartados por contrapressÃ£o: o link nÃ£o estava escoando.
+    /// Descartados por contrapressão: o link não estava escoando.
     dropped: u64,
     keyframe_requests: u64,
     access_lost: u64,
@@ -600,7 +749,7 @@ struct HostStats {
 impl HostStats {
     fn report<T: Transport>(&mut self, t: &T) {
         println!(
-            "host: {} frames | leitura GPU {:.2} ms | BGRAâ†’NV12 {:.2} ms | encode {:.2} ms \
+            "host: {} frames | leitura GPU {:.2} ms | BGRA→NV12 {:.2} ms | encode {:.2} ms \
              | {:.2} Mbps | fila {} KB | ritmo {} desc {} sem-mudanca {}{}{}",
             self.frames,
             med(&mut self.readback_ms),
@@ -616,7 +765,7 @@ impl HostStats {
                     " | entrada {}{}",
                     self.input_events,
                     if VIEW_ONLY.load(Ordering::Relaxed) {
-                        " (nÃ£o injetada)"
+                        " (não injetada)"
                     } else {
                         ""
                     }
@@ -625,7 +774,7 @@ impl HostStats {
                 String::new()
             },
             if self.access_lost > 0 {
-                format!(" | sessÃµes perdidas {}", self.access_lost)
+                format!(" | sessões perdidas {}", self.access_lost)
             } else {
                 String::new()
             },
@@ -639,9 +788,9 @@ impl HostStats {
 // -------------------------------------------------------------- viewer
 
 fn run_viewer<T: Transport>(mut t: T) {
-    // Nada pode ser desenhado antes de saber as dimensÃµes do host.
+    // Nada pode ser desenhado antes de saber as dimensões do host.
     let Some((w, h)) = wait_hello(&mut t) else {
-        eprintln!("viewer: conexÃ£o encerrada antes do Hello");
+        eprintln!("viewer: conexão encerrada antes do Hello");
         return;
     };
     println!("viewer: host anunciou {w}x{h}");
@@ -655,20 +804,20 @@ fn run_viewer<T: Transport>(mut t: T) {
     };
     println!("viewer: decoder [{}]", dec.name());
 
-    // Sem keyframe periÃ³dico, este pedido Ã© a Ãºnica coisa que dÃ¡ ao
+    // Sem keyframe periódico, este pedido é a única coisa que dá ao
     // decodificador um ponto de partida. Sem ele, tela preta para sempre.
     let req = Message::RequestKeyframe;
     if t.send(req.channel(), &req.encode()).is_err() {
-        eprintln!("viewer: nÃ£o foi possÃ­vel pedir o keyframe inicial");
+        eprintln!("viewer: não foi possível pedir o keyframe inicial");
         return;
     }
 
     // `--headless <segundos>`: sem janela.
     //
     // Existe para medir a banda de uma tela realmente parada. Com a janela
-    // aberta Ã© impossÃ­vel: ela exibe a tela que estÃ¡ sendo capturada, entÃ£o
-    // cada quadro exibido altera a tela e gera o prÃ³ximo. A mediÃ§Ã£o mediria a
-    // prÃ³pria realimentaÃ§Ã£o.
+    // aberta é impossível: ela exibe a tela que está sendo capturada, então
+    // cada quadro exibido altera a tela e gera o próximo. A medição mediria a
+    // própria realimentação.
     let headless: Option<u64> = {
         let a: Vec<String> = std::env::args().collect();
         a.iter().position(|x| x == "--headless").map(|i| {
@@ -678,10 +827,10 @@ fn run_viewer<T: Transport>(mut t: T) {
 
     let mut win = match headless {
         Some(_) => None,
-        None => match window::Window::new(w!("PCShare â€” viewer (Sprint 0)"), 960, 540) {
+        None => match window::Window::new(w!("PCShare — viewer (Sprint 0)"), 960, 540) {
             Ok(v) => Some(v),
             Err(e) => {
-                eprintln!("viewer: nÃ£o foi possÃ­vel criar a janela: {e}");
+                eprintln!("viewer: não foi possível criar a janela: {e}");
                 return;
             }
         },
@@ -719,7 +868,7 @@ fn run_viewer<T: Transport>(mut t: T) {
         }
         let mut got_any = false;
 
-        // ---- sondagem de latÃªncia, vÃ¡lida entre mÃ¡quinas quaisquer
+        // ---- sondagem de latência, válida entre máquinas quaisquer
         if Instant::now() >= next_ping {
             nonce += 1;
             let m = Message::Ping {
@@ -732,13 +881,13 @@ fn run_viewer<T: Transport>(mut t: T) {
             next_ping += Duration::from_millis(250);
         }
 
-        // ---- entrada do usuÃ¡rio, de volta para o host
+        // ---- entrada do usuário, de volta para o host
         let (cw, ch) = win.as_ref().map_or((0, 0), |w| w.client_size());
         for raw in win.as_mut().map(|w| w.take_input()).unwrap_or_default() {
             let ev = match raw {
                 // A janela quase nunca tem o tamanho da tela remota. Mapear
-                // pela proporÃ§Ã£o Ã© o que faz o cursor pousar onde o usuÃ¡rio
-                // apontou, e nÃ£o deslocado.
+                // pela proporção é o que faz o cursor pousar onde o usuário
+                // apontou, e não deslocado.
                 window::RawEvent::Move { x, y } => {
                     if cw <= 0 || ch <= 0 {
                         continue;
@@ -771,27 +920,27 @@ fn run_viewer<T: Transport>(mut t: T) {
                         }
                         got_any = true;
                     }
-                    // `sent_us` volta intacto: o RTT sai de uma subtraÃ§Ã£o
-                    // local, entÃ£o vale mesmo entre mÃ¡quinas com relÃ³gios
+                    // `sent_us` volta intacto: o RTT sai de uma subtração
+                    // local, então vale mesmo entre máquinas com relógios
                     // sem qualquer sincronia.
                     Ok(Message::Pong { sent_us, .. }) => {
                         rtt_ms.push((now_us() - sent_us) as f64 / 1000.0);
                     }
                     Ok(_) => {}
-                    Err(e) => eprintln!("viewer: mensagem invÃ¡lida: {e}"),
+                    Err(e) => eprintln!("viewer: mensagem inválida: {e}"),
                 },
                 Ok(None) => break,
                 Err(e) => {
-                    println!("viewer: conexÃ£o encerrada ({e})");
+                    println!("viewer: conexão encerrada ({e})");
                     return;
                 }
             }
         }
 
-        // Todo frame precisa ser *decodificado* â€” H.264 Ã© interdependente e
-        // pular um estraga os seguintes. Mas sÃ³ o mais recente precisa ser
-        // *exibido*: converter e desenhar quadros jÃ¡ obsoletos Ã© trabalho que
-        // atrasa o prÃ³ximo sem que ninguÃ©m veja o resultado.
+        // Todo frame precisa ser *decodificado* — H.264 é interdependente e
+        // pular um estraga os seguintes. Mas só o mais recente precisa ser
+        // *exibido*: converter e desenhar quadros já obsoletos é trabalho que
+        // atrasa o próximo sem que ninguém veja o resultado.
         let batch = dec.take_frames();
         let mut sent_us = None;
         for _ in 0..batch.len() {
@@ -805,8 +954,8 @@ fn run_viewer<T: Transport>(mut t: T) {
             {
                 latency_ms.push((now_us() - sent) as f64 / 1000.0);
             }
-            // Em modo headless a conversÃ£o para BGRA ainda vale a pena: ela
-            // faz parte do custo do viewer, e omiti-la falsearia a mediÃ§Ã£o.
+            // Em modo headless a conversão para BGRA ainda vale a pena: ela
+            // faz parte do custo do viewer, e omiti-la falsearia a medição.
             nv12_to_bgra(
                 &f.data,
                 f.width as usize,
@@ -823,8 +972,8 @@ fn run_viewer<T: Transport>(mut t: T) {
                 println!("viewer: primeira imagem na tela");
                 first = false;
 
-                // VerificaÃ§Ã£o visual do ida-e-volta completo. Contadores de
-                // fps() provam que a pipeline *corre*; sÃ³ olhar um quadro prova
+                // Verificação visual do ida-e-volta completo. Contadores de
+                // fps() provam que a pipeline *corre*; só olhar um quadro prova
                 // que ela corre com a imagem certa.
                 if let Some(path) = dump_to.as_deref() {
                     match save_bmp(path, &rgb, f.width as i32, f.height as i32) {
@@ -840,12 +989,12 @@ fn run_viewer<T: Transport>(mut t: T) {
             latency_ms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             rtt_ms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-            // A latÃªncia capturaâ†’exibiÃ§Ã£o some quando os relÃ³gios nÃ£o sÃ£o o
-            // mesmo. Melhor nÃ£o reportar do que reportar um nÃºmero que
-            // parece medida e Ã© diferenÃ§a de instantes de partida.
+            // A latência captura→exibição some quando os relógios não são o
+            // mesmo. Melhor não reportar do que reportar um número que
+            // parece medida e é diferença de instantes de partida.
             let travessia = if SAME_PROCESS.load(Ordering::Relaxed) {
                 format!(
-                    " | capturaâ†’exibiÃ§Ã£o p50 {:.1} ms  p99 {:.1} ms",
+                    " | captura→exibição p50 {:.1} ms  p99 {:.1} ms",
                     pct(&latency_ms, 0.50),
                     pct(&latency_ms, 0.99),
                 )
@@ -894,8 +1043,8 @@ fn wait_hello<T: Transport>(t: &mut T) -> Option<(u32, u32)> {
     None
 }
 
-/// Grava BGRA como BMP de 32 bits. Formato escolhido por ser o Ãºnico que se
-/// escreve sem dependÃªncia: cabeÃ§alho fixo e pixels crus, sem compressÃ£o.
+/// Grava BGRA como BMP de 32 bits. Formato escolhido por ser o único que se
+/// escreve sem dependência: cabeçalho fixo e pixels crus, sem compressão.
 fn save_bmp(path: &str, bgra: &[u8], w: i32, h: i32) -> std::io::Result<()> {
     let pixels = (w as usize) * (h as usize) * 4;
     let mut f = Vec::with_capacity(54 + pixels);
@@ -907,7 +1056,7 @@ fn save_bmp(path: &str, bgra: &[u8], w: i32, h: i32) -> std::io::Result<()> {
 
     f.extend_from_slice(&40u32.to_le_bytes());
     f.extend_from_slice(&w.to_le_bytes());
-    // Altura negativa: linhas de cima para baixo, como o buffer estÃ¡. Sem
+    // Altura negativa: linhas de cima para baixo, como o buffer está. Sem
     // isso a imagem sai invertida.
     f.extend_from_slice(&(-h).to_le_bytes());
     f.extend_from_slice(&1u16.to_le_bytes());
