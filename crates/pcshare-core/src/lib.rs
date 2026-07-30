@@ -5,9 +5,11 @@
 //! a troca não pode exigir reescrever a pipeline de vídeo.
 
 pub mod proto;
+pub mod secure;
 pub mod tcp;
 pub mod transport;
 
 pub use proto::{InputEvent, Message, MouseButton, ProtoError};
+pub use secure::{Identity, SecureTransport, fingerprint_of};
 pub use tcp::TcpTransport;
 pub use transport::{Channel, Transport};

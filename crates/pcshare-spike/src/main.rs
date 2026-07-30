@@ -25,7 +25,8 @@ use pcshare_capture::{CaptureError, DesktopCapture};
 use pcshare_gpu::GpuContext;
 use pcshare_codec::convert::{bgra_to_nv12, nv12_to_bgra};
 use pcshare_codec::{H264Decoder, H264Encoder};
-use pcshare_core::{Channel, InputEvent, Message, TcpTransport, Transport};
+use pcshare_core::secure;
+use pcshare_core::{Channel, Identity, InputEvent, Message, TcpTransport, Transport};
 use windows::core::w;
 
 const FPS: u32 = 30;
@@ -71,13 +72,40 @@ fn main() {
         println!("modo somente visualização: entrada não será injetada");
     }
 
+    // `--sem-cripto` mantém o caminho em texto claro para comparação de
+    // custo. Nunca deve existir num binário distribuído.
+    let plaintext = args.iter().any(|a| a == "--sem-cripto");
+
     match args.first().map(String::as_str) {
         Some("host") => {
             let bind = args.get(1).cloned().unwrap_or_else(|| "0.0.0.0:7000".into());
+            let identity = load_identity().expect("identidade");
+            let password = arg_value("--password").unwrap_or_else(secure::random_password);
+
+            println!("\n  ID desta máquina : {}", identity.display_id());
+            println!("  Senha da sessão  : {password}");
+            println!("  Impressão digital: {}\n", identity.fingerprint());
+
             let listener = TcpListener::bind(&bind).expect("bind falhou");
             println!("host aguardando viewer em {bind}");
-            let t = TcpTransport::accept(&listener).expect("accept falhou");
-            if let Err(e) = run_host(t) {
+            let tcp = TcpTransport::accept(&listener).expect("accept falhou");
+
+            let result = if plaintext {
+                eprintln!("AVISO: sessão SEM criptografia");
+                run_host(tcp)
+            } else {
+                match secure::accept(tcp, &identity, &password) {
+                    Ok(sec) => {
+                        println!("host: sessão cifrada com {}", sec.remote_fingerprint());
+                        run_host(sec)
+                    }
+                    Err(e) => {
+                        eprintln!("host: autenticação recusada ({e})");
+                        return;
+                    }
+                }
+            };
+            if let Err(e) = result {
                 eprintln!("host encerrou: {e}");
             }
         }
@@ -86,9 +114,30 @@ fn main() {
                 .get(1)
                 .cloned()
                 .unwrap_or_else(|| "127.0.0.1:7000".into());
-            let t = TcpTransport::connect(&addr).expect("connect falhou");
+            let tcp = TcpTransport::connect(&addr).expect("connect falhou");
             println!("viewer conectado a {addr}");
-            run_viewer(t);
+
+            if plaintext {
+                eprintln!("AVISO: sessão SEM criptografia");
+                run_viewer(tcp);
+                return;
+            }
+
+            let Some(password) = arg_value("--password") else {
+                eprintln!("viewer: informe --password <senha exibida pelo host>");
+                return;
+            };
+            let identity = load_identity().expect("identidade");
+            match secure::connect(tcp, &identity, &password) {
+                Ok(sec) => {
+                    // Conferir esta impressão com quem está do outro lado é o
+                    // que fecha o buraco de intermediação — o servidor de
+                    // sinalização da Fase 2 não é confiável por natureza.
+                    println!("viewer: host autenticado, impressão {}", sec.remote_fingerprint());
+                    run_viewer(sec);
+                }
+                Err(e) => eprintln!("viewer: não foi possível autenticar ({e})"),
+            }
         }
         _ => run_loopback(),
     }
@@ -114,7 +163,39 @@ fn run_loopback() {
 
 // ---------------------------------------------------------------- host
 
-fn run_host(mut t: TcpTransport) -> Result<(), Box<dyn std::error::Error>> {
+/// Carrega a identidade da máquina, criando na primeira execução.
+///
+/// Precisa persistir: o ID que a pessoa dita por telefone é derivado da chave
+/// pública, então gerar uma nova a cada início trocaria o ID da máquina e
+/// invalidaria qualquer pareamento anterior.
+fn load_identity() -> Result<Identity, Box<dyn std::error::Error>> {
+    let dir = std::path::PathBuf::from(
+        std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into()),
+    )
+    .join("PCShare");
+    let path = dir.join("identity.key");
+
+    if let Ok(bytes) = std::fs::read(&path)
+        && let Ok(id) = Identity::from_private(bytes)
+    {
+        return Ok(id);
+    }
+
+    let id = Identity::generate()?;
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(&path, id.private_key())?;
+    println!("identidade criada em {}", path.display());
+    // TODO(Fase 3): a chave fica em texto claro no perfil do usuário. O
+    // produto precisa protegê-la com DPAPI e permissões restritas.
+    Ok(id)
+}
+
+fn arg_value(nome: &str) -> Option<String> {
+    let a: Vec<String> = std::env::args().collect();
+    a.iter().position(|x| x == nome).and_then(|i| a.get(i + 1).cloned())
+}
+
+fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
     // `--cpu-path` força o caminho antigo (leitura da GPU + conversão na CPU),
     // para comparação A/B com o caminho sem cópia.
     let force_cpu = std::env::args().any(|a| a == "--cpu-path");
@@ -304,7 +385,7 @@ struct HostStats {
 }
 
 impl HostStats {
-    fn report(&mut self, t: &TcpTransport) {
+    fn report<T: Transport>(&mut self, t: &T) {
         println!(
             "host: {} frames | leitura GPU {:.2} ms | BGRA→NV12 {:.2} ms | encode {:.2} ms \
              | {:.2} Mbps | fila {} KB | ritmo {} desc {} sem-mudanca {}{}{}",
@@ -344,7 +425,7 @@ impl HostStats {
 
 // -------------------------------------------------------------- viewer
 
-fn run_viewer(mut t: TcpTransport) {
+fn run_viewer<T: Transport>(mut t: T) {
     // Nada pode ser desenhado antes de saber as dimensões do host.
     let Some((w, h)) = wait_hello(&mut t) else {
         eprintln!("viewer: conexão encerrada antes do Hello");
@@ -584,7 +665,7 @@ fn run_viewer(mut t: TcpTransport) {
     }
 }
 
-fn wait_hello(t: &mut TcpTransport) -> Option<(u32, u32)> {
+fn wait_hello<T: Transport>(t: &mut T) -> Option<(u32, u32)> {
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
         match t.poll() {

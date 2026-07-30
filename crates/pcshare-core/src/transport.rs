@@ -39,6 +39,13 @@ pub trait Transport: Send {
     /// Empurra o que estiver pendente. Chamar ao fim de um lote de envios.
     fn flush(&mut self) -> io::Result<()>;
 
+    /// Bytes enfileirados que o sistema operacional ainda não aceitou.
+    ///
+    /// É o sinal de contrapressão: crescendo, significa que estamos
+    /// produzindo vídeo mais rápido do que o link escoa, e a resposta é
+    /// descartar quadros em vez de acumulá-los.
+    fn pending_out(&self) -> usize;
+
     /// Bytes entregues ao sistema operacional desde a criação.
     fn bytes_sent(&self) -> u64;
     fn bytes_received(&self) -> u64;

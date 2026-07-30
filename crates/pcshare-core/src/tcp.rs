@@ -68,12 +68,6 @@ impl TcpTransport {
         self.peer
     }
 
-    /// Bytes ainda não aceitos pelo sistema operacional. Crescendo sem parar,
-    /// significa que estamos produzindo vídeo mais rápido que o link escoa.
-    pub fn pending_out(&self) -> usize {
-        self.out_buf.len()
-    }
-
     fn try_write(&mut self) -> io::Result<()> {
         while !self.out_buf.is_empty() {
             match self.stream.write(&self.out_buf) {
@@ -176,6 +170,10 @@ impl Transport for TcpTransport {
 
     fn flush(&mut self) -> io::Result<()> {
         self.try_write()
+    }
+
+    fn pending_out(&self) -> usize {
+        self.out_buf.len()
     }
 
     fn bytes_sent(&self) -> u64 {

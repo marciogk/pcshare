@@ -157,7 +157,7 @@ troca de SDP/ICE. Uma vez estabelecida a sessão, sai do caminho.
 *toda* a banda de vídeo passa por você. É o principal custo variável de
 infraestrutura e precisa estar na precificação desde o começo.
 
-### D7 — Criptografia ponta a ponta, com verificação de identidade
+### D7 — Criptografia ponta a ponta, com verificação de identidade  ✅ IMPLEMENTADO
 
 DTLS-SRTP do WebRTC já dá E2E entre os peers, inclusive através do TURN (o
 relay só encaminha pacotes cifrados).
@@ -165,6 +165,42 @@ relay só encaminha pacotes cifrados).
 Mas isso sozinho **não** protege contra MITM feito pelo próprio servidor de
 sinalização. É necessário verificar a chave pública do peer fora da banda —
 modelo ID + senha, com fingerprint fixado no primeiro pareamento.
+
+**Implementação:** `Noise_XXpsk3_25519_ChaChaPoly_BLAKE2s`, via `snow`.
+Handshake criptográfico próprio é onde código caseiro falha em silêncio —
+funciona nos testes e não protege de ninguém. O Noise tem análise formal
+publicada.
+
+- **XX** — autenticação mútua sem conhecimento prévio de chaves. Necessário
+  porque na primeira conexão o viewer não sabe nada sobre o host.
+- **psk3** — a senha entra como chave pré-compartilhada. Quem não a tem não
+  conclui o handshake e não vê um pixel.
+- PSK = `Argon2id(senha, sal = chave pública do host)`. KDF caro porque a
+  senha é curta e digitada por gente; sem ele, um dicionário inteiro cai em
+  minutos.
+
+O host anuncia sua chave pública em claro — ela é a identidade, não segredo.
+Um intermediário que a substitua faz o viewer derivar outra PSK, e o handshake
+falha. A senha nunca trafega, em forma alguma.
+
+> **Confirmação de chave, e não é formalidade.** Em `XXpsk3` a senha entra na
+> terceira mensagem, que o iniciador **envia**. Ele conclui o handshake sem
+> jamais comprovar que o outro lado a conhece — e, com senha errada, anunciava
+> "autenticado" enquanto o host já tinha recusado. Observado em teste.
+>
+> Não havia vazamento: as chaves de transporte divergem e nada trafega. Mas um
+> viewer que declara sucesso e só descobre o erro quando a conexão cai é
+> inaceitável num produto cuja promessa central é a autenticação. O responder
+> passa a enviar a impressão do handshake cifrada, e o iniciador só considera
+> a sessão válida depois de decifrá-la.
+
+**Limite conhecido:** o modo de transporte do Noise numera as mensagens
+implicitamente, exigindo decifragem **em ordem**. Sobre TCP é garantido; o
+canal de mídia melhor-esforço da Fase 2 vai exigir números de sequência
+explícitos.
+
+**Pendente:** a chave privada fica em texto claro em `%LOCALAPPDATA%\PCShare`.
+O produto precisa protegê-la com DPAPI e permissões restritas (Fase 3).
 
 ### D8 — Esperar por evento, nunca por relógio
 

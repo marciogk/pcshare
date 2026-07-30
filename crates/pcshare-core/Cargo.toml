@@ -6,3 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+argon2 = "0.5.3"
+blake2 = "0.10.6"
+rand = "0.10.2"
+snow = "0.10.0"
