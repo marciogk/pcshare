@@ -105,16 +105,31 @@ impl QuicListener {
     /// programa aceitava **uma única conexão** na vida — se ela caísse, só
     /// reiniciando o processo na máquina remota, justamente a que o usuário
     /// não alcança.
+    /// Só retorna com uma sessão pronta, ou com erro de fato fatal.
+    ///
+    /// Tentativa de conexão que não completa o handshake **não** é fatal e não
+    /// pode chegar ao chamador: pacotes tardios de uma conexão encerrada
+    /// chegam a criar tentativas que nunca completam, e propagar isso derrubava
+    /// o host logo depois de uma sessão normal terminar. Observado em teste
+    /// entre duas máquinas.
     pub fn accept(&self) -> io::Result<QuicTransport> {
-        let endpoint = self.endpoint.clone();
-        let conn = self.rt.block_on(async move {
-            let incoming = endpoint
-                .accept()
-                .await
-                .ok_or_else(|| other("endpoint fechado antes de qualquer conexão"))?;
-            incoming.await.map_err(other)
-        })?;
-        QuicTransport::spawn(self.rt.clone(), conn, true)
+        loop {
+            let endpoint = self.endpoint.clone();
+            let resultado = self.rt.block_on(async move {
+                let incoming = endpoint.accept().await.ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotConnected, "endpoint fechado")
+                })?;
+                incoming.await.map_err(other)
+            });
+
+            match resultado {
+                Ok(conn) => return QuicTransport::spawn(self.rt.clone(), conn, true),
+                // O endpoint acabou: não há mais o que escutar.
+                Err(e) if e.kind() == io::ErrorKind::NotConnected => return Err(e),
+                // Tentativa abortada. Segue escutando.
+                Err(_) => continue,
+            }
+        }
     }
 }
 

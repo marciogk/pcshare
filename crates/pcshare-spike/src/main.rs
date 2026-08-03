@@ -520,16 +520,30 @@ where
     T: Transport,
     F: FnMut() -> std::io::Result<T>,
 {
+    /// Desistir só depois de muitas falhas seguidas evita tanto o encerramento
+    /// prematuro quanto um laço girando em falso para sempre.
+    const MAX_FALHAS_SEGUIDAS: u32 = 50;
+
     let mut n = 0u64;
+    let mut falhas = 0u32;
     loop {
         println!("aguardando conexão...");
         let t = match aceitar() {
-            Ok(t) => t,
+            Ok(t) => {
+                falhas = 0;
+                t
+            }
             Err(e) => {
-                // Falha no próprio ponto de escuta é fatal: sem ele não há o
-                // que atender.
-                eprintln!("não foi possível aceitar conexões: {e}");
-                return;
+                // Uma tentativa de conexão que morre no meio não pode derrubar
+                // o host — foi exatamente assim que ele encerrou sozinho num
+                // teste real, logo após uma sessão normal terminar.
+                falhas += 1;
+                eprintln!("conexão recusada ou incompleta ({e}); continuando a escutar");
+                if falhas >= MAX_FALHAS_SEGUIDAS {
+                    eprintln!("{MAX_FALHAS_SEGUIDAS} falhas seguidas ao aceitar; desistindo");
+                    return;
+                }
+                continue;
             }
         };
 
