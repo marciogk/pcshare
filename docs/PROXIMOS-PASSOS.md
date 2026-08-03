@@ -89,12 +89,20 @@ Falta rodar **sem** essa opção nas duas pontas, para ver o controle funcionand
 
 > Só faça numa máquina à qual consiga voltar fisicamente.
 
-### 3. Reconexão automática 🔴 defeito conhecido
+### 3. ~~Reconexão automática~~ ✅ corrigido em 31/07/2026
 
-O host aceita uma sessão e para de escutar. Num produto isso é inaceitável: se
-a conexão cair, o usuário teria que reiniciar o programa na máquina remota —
-exatamente a que ele não alcança. Precisa voltar a escutar após o fim de uma
-sessão.
+O host agora atende sessões indefinidamente e sobrevive a senha errada. O log
+distingue os desfechos:
+
+```
+--- sessão 1 encerrada: viewer desconectou ---
+--- sessão 2 encerrada: autenticação recusada (senha incorreta) ---
+--- sessão 3 encerrada: viewer desconectou ---
+```
+
+**Consequência prática para os testes:** não é mais preciso reiniciar o host
+entre tentativas. Se der `timed out` agora, é rede de verdade — não a vaga
+única de sessão.
 
 ---
 

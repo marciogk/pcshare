@@ -111,19 +111,19 @@ fn main() {
             println!("  Senha da sessão  : {password}");
             println!("  Impressão digital: {}\n", identity.fingerprint());
 
-            println!("host aguardando viewer em {bind} ({})", transporte(quic));
-            let result = if quic {
+            println!("host escutando em {bind} ({})\n", transporte(quic));
+            if quic {
                 let listener =
                     QuicListener::bind(bind.parse().expect("endereço inválido")).expect("bind");
-                let t = listener.accept().expect("accept falhou");
-                servir(t, &identity, &password, plaintext)
+                atender(|| listener.accept(), &identity, &password, plaintext);
             } else {
                 let listener = TcpListener::bind(&bind).expect("bind falhou");
-                let t = TcpTransport::accept(&listener).expect("accept falhou");
-                servir(t, &identity, &password, plaintext)
-            };
-            if let Err(e) = result {
-                eprintln!("host encerrou: {e}");
+                atender(
+                    || TcpTransport::accept(&listener),
+                    &identity,
+                    &password,
+                    plaintext,
+                );
             }
         }
         Some("viewer") => {
@@ -503,6 +503,70 @@ fn load_identity() -> Result<Identity, Box<dyn std::error::Error>> {
 
 fn transporte(quic: bool) -> &'static str {
     if quic { "QUIC" } else { "TCP" }
+}
+
+/// Atende sessões indefinidamente, uma após a outra.
+///
+/// O host **precisa** voltar a escutar quando uma sessão acaba. A versão
+/// anterior aceitava uma conexão e encerrava: se a sessão caísse — queda de
+/// rede, viewer fechado, suspensão da máquina — só reiniciando o programa na
+/// máquina remota, que é justamente a que o usuário não alcança. Foi o defeito
+/// mais grave encontrado no teste entre duas máquinas.
+///
+/// Uma falha de autenticação também não pode derrubar o host: senha errada
+/// deve custar uma sessão, não o atendimento inteiro.
+fn atender<T, F>(mut aceitar: F, identity: &Identity, password: &str, plaintext: bool)
+where
+    T: Transport,
+    F: FnMut() -> std::io::Result<T>,
+{
+    let mut n = 0u64;
+    loop {
+        println!("aguardando conexão...");
+        let t = match aceitar() {
+            Ok(t) => t,
+            Err(e) => {
+                // Falha no próprio ponto de escuta é fatal: sem ele não há o
+                // que atender.
+                eprintln!("não foi possível aceitar conexões: {e}");
+                return;
+            }
+        };
+
+        n += 1;
+        println!("--- sessão {n} iniciada ---");
+        match servir(t, identity, password, plaintext) {
+            Ok(()) => println!("--- sessão {n} encerrada ---\n"),
+            Err(e) => match classificar(e.as_ref()) {
+                Some(motivo) => println!("--- sessão {n} encerrada: {motivo} ---\n"),
+                None => println!("--- sessão {n} encerrada com falha: {e} ---\n"),
+            },
+        }
+        // TODO(produto): senha de sessão deveria ser sorteada a cada
+        // atendimento, como fazem AnyDesk e TeamViewer. Mantida fixa aqui para
+        // não invalidar a senha que o usuário já anotou durante os testes.
+    }
+}
+
+/// Traduz os fins de sessão esperados para linguagem de gente.
+///
+/// Nem todo `Err` é defeito. O viewer fechar a janela chega aqui como
+/// "unexpected end of file", e uma senha errada como "decrypt error" — dois
+/// desfechos perfeitamente normais que, escritos assim no log, fariam qualquer
+/// um procurar um problema que não existe.
+///
+/// Devolve `None` quando o erro é de fato inesperado e merece atenção.
+fn classificar(e: &(dyn std::error::Error + 'static)) -> Option<&'static str> {
+    use std::io::ErrorKind::*;
+    let io = e.downcast_ref::<std::io::Error>()?;
+    match io.kind() {
+        UnexpectedEof | BrokenPipe | ConnectionReset | ConnectionAborted => {
+            Some("viewer desconectou")
+        }
+        PermissionDenied => Some("autenticação recusada (senha incorreta)"),
+        TimedOut => Some("tempo esgotado esperando o viewer"),
+        _ => None,
+    }
 }
 
 /// Handshake do lado do host e entrada no laço de captura.

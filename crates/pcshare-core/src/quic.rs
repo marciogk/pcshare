@@ -57,8 +57,9 @@ pub struct QuicTransport {
     sent: Arc<AtomicU64>,
     received: Arc<AtomicU64>,
     remote: SocketAddr,
-    /// Mantém a thread de E/S viva enquanto o transporte existir.
-    _runtime: Arc<RuntimeGuard>,
+    /// Mantém o runtime vivo enquanto o transporte existir. Quando o último
+    /// `QuicTransport` e o `QuicListener` somem, o runtime é derrubado junto.
+    _runtime: Arc<tokio::runtime::Runtime>,
 }
 
 enum Outgoing {
@@ -66,23 +67,15 @@ enum Outgoing {
     Media(Vec<u8>),
 }
 
-struct RuntimeGuard {
-    shutdown: UnboundedSender<Outgoing>,
-}
-
-impl Drop for RuntimeGuard {
-    fn drop(&mut self) {
-        // Fechar o canal faz o laço de E/S terminar sozinho.
-        let _ = &self.shutdown;
-    }
-}
-
 /// Ponto de escuta. Separado de [`QuicTransport`] para que o endereço
 /// efetivamente vinculado possa ser lido antes de alguém conectar — útil com
 /// porta efêmera.
 pub struct QuicListener {
     endpoint: Endpoint,
-    rt: tokio::runtime::Runtime,
+    /// Compartilhado com cada sessão aceita. A conexão do quinn é conduzida
+    /// pelo runtime do `Endpoint` que a originou; usar outro faria a sessão
+    /// morrer assim que o primeiro parasse de ser conduzido.
+    rt: Arc<tokio::runtime::Runtime>,
 }
 
 impl QuicListener {
@@ -95,7 +88,10 @@ impl QuicListener {
             let _guard = rt.enter();
             server_endpoint(addr)?
         };
-        Ok(Self { endpoint, rt })
+        Ok(Self {
+            endpoint,
+            rt: Arc::new(rt),
+        })
     }
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -103,16 +99,22 @@ impl QuicListener {
     }
 
     /// Bloqueia até alguém conectar.
-    pub fn accept(self) -> io::Result<QuicTransport> {
-        let endpoint = self.endpoint;
-        let conn = self.rt.block_on(async {
+    ///
+    /// Recebe `&self` de propósito: o host precisa voltar a escutar quando uma
+    /// sessão termina. A versão anterior consumia o listener, e por isso o
+    /// programa aceitava **uma única conexão** na vida — se ela caísse, só
+    /// reiniciando o processo na máquina remota, justamente a que o usuário
+    /// não alcança.
+    pub fn accept(&self) -> io::Result<QuicTransport> {
+        let endpoint = self.endpoint.clone();
+        let conn = self.rt.block_on(async move {
             let incoming = endpoint
                 .accept()
                 .await
                 .ok_or_else(|| other("endpoint fechado antes de qualquer conexão"))?;
             incoming.await.map_err(other)
         })?;
-        QuicTransport::spawn(self.rt, conn, true)
+        QuicTransport::spawn(self.rt.clone(), conn, true)
     }
 }
 
@@ -136,14 +138,18 @@ impl QuicTransport {
                 .await
                 .map_err(other)
         })?;
-        Self::spawn(rt, conn, false)
+        Self::spawn(Arc::new(rt), conn, false)
     }
 
     pub fn remote(&self) -> SocketAddr {
         self.remote
     }
 
-    fn spawn(rt: tokio::runtime::Runtime, conn: Connection, server: bool) -> io::Result<Self> {
+    fn spawn(
+        rt: Arc<tokio::runtime::Runtime>,
+        conn: Connection,
+        server: bool,
+    ) -> io::Result<Self> {
         let remote = conn.remote_address();
         let (to_io, mut rx_io) = tokio::sync::mpsc::unbounded_channel::<Outgoing>();
         let (tx_app, from_io) = std::sync::mpsc::channel::<(Channel, Vec<u8>)>();
@@ -153,12 +159,11 @@ impl QuicTransport {
         let received = Arc::new(AtomicU64::new(0));
 
         let (p, s, r) = (pending.clone(), sent.clone(), received.clone());
-        let (shutdown_tx, _shutdown_rx) = tokio::sync::mpsc::unbounded_channel::<Outgoing>();
 
-        std::thread::Builder::new()
-            .name("pcshare-quic".into())
-            .spawn(move || {
-                rt.block_on(async move {
+        // Tarefa no runtime compartilhado, não uma thread própria com
+        // `block_on`. É o que permite várias sessões ao longo do tempo sobre o
+        // mesmo `Endpoint`.
+        rt.spawn(async move {
                     // Quem aceita abre o fluxo de controle; quem conecta espera.
                     // Alguém precisa começar, e fixar o papel evita corrida.
                     let (mut ctrl_tx, mut ctrl_rx) = if server {
@@ -225,6 +230,16 @@ impl QuicTransport {
                         }
                     });
 
+                    // Sem isto o host não percebe o viewer sumir.
+                    //
+                    // As duas tarefas de leitura acima terminam quando a
+                    // conexão cai, e cada uma solta a sua cópia do remetente.
+                    // Mas se esta tarefa segurar a original, o canal nunca
+                    // fecha: `poll` devolve "nada novo" para sempre e o host
+                    // segue capturando e codificando para ninguém, sem nunca
+                    // voltar a escutar. Observado travando exatamente assim.
+                    drop(tx_app);
+
                     while let Some(msg) = rx_io.recv().await {
                         match msg {
                             Outgoing::Control(data) => {
@@ -262,8 +277,7 @@ impl QuicTransport {
                             }
                         }
                     }
-                });
-            })?;
+        });
 
         Ok(Self {
             to_io,
@@ -272,9 +286,7 @@ impl QuicTransport {
             sent,
             received,
             remote,
-            _runtime: Arc::new(RuntimeGuard {
-                shutdown: shutdown_tx,
-            }),
+            _runtime: rt,
         })
     }
 }
@@ -340,9 +352,18 @@ fn ensure_crypto_provider() {
     });
 }
 
+/// Runtime com threads próprias, e não `current_thread`.
+///
+/// Um runtime de thread única só avança tarefas enquanto alguém está dentro de
+/// `block_on`. Como o mesmo runtime passou a ser compartilhado entre o ponto de
+/// escuta e as sessões, as tarefas de E/S precisam continuar rodando **entre**
+/// os `accept` — senão a sessão em curso congelaria toda vez que o host
+/// voltasse a escutar.
 fn runtime() -> io::Result<tokio::runtime::Runtime> {
     ensure_crypto_provider();
-    tokio::runtime::Builder::new_current_thread()
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_name("pcshare-quic")
         .enable_all()
         .build()
 }
@@ -456,6 +477,36 @@ mod tests {
             }
             assert!(Instant::now() < deadline, "nada chegou em 10s");
             std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// O defeito observado no teste entre duas máquinas: o host aceitava uma
+    /// conexão e parava de escutar. Se a sessão caísse, só reiniciando o
+    /// processo na máquina remota — justamente a que o usuário não alcança.
+    #[test]
+    fn listener_aceita_varias_sessoes_em_sequencia() {
+        let listener = QuicListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        for rodada in 1..=3u8 {
+            // O handshake exige as duas pontas ao mesmo tempo.
+            let conectando = std::thread::spawn(move || QuicTransport::connect(addr).unwrap());
+            let mut servidor = listener
+                .accept()
+                .unwrap_or_else(|e| panic!("accept da rodada {rodada} falhou: {e}"));
+            let mut cliente = conectando.join().unwrap();
+
+            cliente.send(Channel::Control, &[rodada]).unwrap();
+            assert_eq!(
+                wait(&mut servidor).1,
+                vec![rodada],
+                "dados da rodada {rodada}"
+            );
+
+            // Encerra a sessão antes da próxima, que é o cenário real:
+            // a conexão cai e alguém precisa reconectar.
+            drop(cliente);
+            drop(servidor);
         }
     }
 

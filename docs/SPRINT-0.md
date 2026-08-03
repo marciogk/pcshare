@@ -151,10 +151,22 @@ distintas — host `54:34:16:…`, viewer com identidade própria.
 
 ### Pendências que a etapa 5 revelou
 
-1. **O host aceita uma única sessão.** Depois que alguém conecta, ele sai do
-   modo de escuta. Se a conexão cair, seria preciso reiniciar o programa na
-   máquina remota — justamente a que não se alcança. Limitação séria para o
-   produto.
+1. ~~**O host aceita uma única sessão.**~~ ✅ **corrigido em 31/07/2026.**
+   O host agora atende sessões indefinidamente. Duas causas separadas:
+
+   - `QuicListener::accept` consumia o listener e levava o runtime junto.
+     Passou a receber `&self`, com o runtime compartilhado via `Arc` — e
+     multithread, porque um runtime de thread única só avança tarefas dentro de
+     `block_on` e a sessão em curso congelaria a cada `accept`.
+   - Mesmo assim o host travava ao fim da sessão: as tarefas de leitura
+     terminavam quando a conexão caía, mas a tarefa principal segurava a
+     original do remetente do canal. O canal nunca fechava, `poll` devolvia
+     "nada novo" para sempre e o host seguia capturando e codificando para
+     ninguém.
+
+   Verificado com os binários reais: quatro sessões seguidas, com uma senha
+   errada no meio, e o host voltando a escutar em todas. Travado pelo teste
+   `listener_aceita_varias_sessoes_em_sequencia`.
 2. **Impressões digitais divergentes entre as duas sessões**
    (`B4:84:8F:…` e `8D:62:14:…`). O teste
    `identidade_recarregada_do_disco_e_a_mesma` passa e o arquivo de identidade
