@@ -284,6 +284,23 @@ cadeia de atualização automática precisa validar assinatura.
 > OV basta ou se o EV é obrigatório para passar pelo Smart App Control, e
 > quanto tempo leva para acumular reputação a partir do zero.
 
+**A mensagem que o Windows mostra, capturada em 03/08/2026:**
+
+![Bloqueio do Smart App Control](img/smart-app-control-bloqueio.png)
+
+> *"Parte deste aplicativo foi bloqueado. Alguns recursos do Windows PowerShell
+> podem não funcionar porque **não é possível confirmar quem publicou**
+> `pcshare.exe` que o aplicativo tentou carregar."*
+
+O texto nomeia a causa sem rodeios: **falta de assinatura digital**. Não é
+heurística de comportamento, não é falso positivo de antivírus, não é algo que
+se resolva escrevendo o código de outro jeito. O sistema não sabe quem
+publicou o binário e por isso o recusa.
+
+Guardar esta captura tem um propósito: **é exatamente a tela que o cliente
+veria** ao instalar o produto sem certificado. Serve de argumento pronto quando
+o custo do certificado for discutido.
+
 **Desligar o Smart App Control é solução de bancada, não do produto.** Vale a
 pena ser explícito porque a leitura contrária inviabilizaria o negócio: nenhum
 cliente vai mexer em configuração de segurança, e o cliente típico de suporte
