@@ -1,6 +1,54 @@
 # Próximos passos
 
-Atualizado em 30/07/2026, ao encerrar a sessão de testes.
+Atualizado em 03/08/2026, ao encerrar.
+
+---
+
+## 🔴 PRIMEIRO DE TUDO: o desenvolvimento está bloqueado
+
+O Smart App Control está **ligado** e impede compilar em release, rodar testes
+e executar qualquer binário. Só compilar em debug ainda funciona, o que não
+permite verificar nada.
+
+A mensagem do Windows nomeia a causa: *"não é possível confirmar quem publicou
+`pcshare.exe`"* — falta de assinatura digital. Ver a captura em
+[ARQUITETURA.md](ARQUITETURA.md), risco R1.
+
+**Desligar antes de qualquer outra coisa:**
+
+```
+Tecla Windows → "Segurança do Windows" → Enter
+→ Controle de aplicativo e navegador
+→ Configurações de Controle Inteligente de Aplicativos
+→ Desativado
+```
+
+Conferir (tem de responder `0`):
+
+```powershell
+(Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy").VerifiedAndReputablePolicyState
+```
+
+Depois, reconstruir o que a limpeza apagou:
+
+```powershell
+cd "c:\Projeto Pcshare"
+cargo build --release --workspace
+cargo test --workspace
+```
+
+> **Lição registrada:** foi um `cargo clean --release` que disparou isso. A
+> limpeza invalidou artefatos que já tinham reputação, e cada script de
+> compilação virou executável de hash inédito. Com o Smart App Control ligado,
+> **não limpar o perfil release**.
+
+> Vale manter esta máquina como a única que reproduz a experiência real do
+> cliente: religar o Smart App Control depois, para testar o instalador
+> assinado quando houver certificado.
+
+---
+
+## Estado anterior (30/07/2026)
 
 **O Sprint 0 está completo.** Todos os critérios foram atingidos, incluindo a
 etapa 5 entre duas máquinas em rede real. Os resultados estão em
@@ -106,14 +154,24 @@ entre tentativas. Se der `timed out` agora, é rede de verdade — não a vaga
 
 ---
 
-## Próximo marco técnico
+## Fase 3 — já começou
 
-**Fase 3 — arquitetura serviço + agente**, para funcionar durante prompts de
-UAC e na tela de bloqueio. É o maior risco de cronograma restante e o que
-separa um protótipo de um produto de suporte remoto.
+**Feito e commitado** (`crates/pcshare-capture/src/desktop.rs`): detecção de
+qual desktop recebe entrada (`Default`, `Winlogon`, `Screen-saver`) e de qual
+sessão o processo ocupa. Um processo comum recebe **acesso negado** ao
+consultar o desktop de entrada enquanto o Secure Desktop está ativo, e essa
+negativa é o sinal, não um erro. Nada disso exige privilégio elevado.
 
-Exige elevação de privilégio e, muito provavelmente, desligar o Smart App
-Control aqui — um serviço não assinado dificilmente passa.
+**Próximo passo, assim que der para rodar código:**
+
+1. Instrumentar a captura com o detector e **medir a falha** — quanto tempo
+   fica cega durante um prompt de UAC, com que sintoma, se `recover()` resolve.
+   Exige acionar um prompt de UAC com o medidor rodando.
+2. Só então desenhar o serviço + agente da decisão D5, com o problema
+   quantificado em vez de suposto.
+
+A instalação do serviço exigirá elevação e, quase certamente, o Smart App
+Control desligado — um serviço não assinado dificilmente passa.
 
 ---
 
