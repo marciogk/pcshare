@@ -5,6 +5,8 @@
 //! o frame anterior. Numa tela de escritório parada quase nenhum pixel muda,
 //! e codificar a tela inteira a 30 fps desperdiça banda e CPU.
 
+pub mod desktop;
+
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_TEXTURE2D_DESC,
