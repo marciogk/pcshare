@@ -28,6 +28,8 @@ const TIMEOUT_MS: u32 = 15;
 const LIMITE: Duration = Duration::from_secs(90);
 /// Tempo observando antes de disparar o prompt, para a linha de base assentar.
 const ASSENTAR: Duration = Duration::from_secs(3);
+/// Pausa entre tentativas de recuperação enquanto a captura está cega.
+const BACKOFF: Duration = Duration::from_millis(50);
 
 fn main() {
     let manual = std::env::args().any(|a| a == "--manual");
@@ -145,12 +147,18 @@ fn main() {
                         // Falhar aqui é o esperado enquanto o Secure Desktop
                         // está na frente. Insistir é o comportamento correto —
                         // e é o que um host de verdade fará.
-                        if recover_falhou <= 3 || recover_falhou % 50 == 0 {
+                        if recover_falhou <= 3 || recover_falhou % 20 == 0 {
                             anotar(
                                 &mut eventos,
                                 format!("  ^ recover() falhou #{recover_falhou}: {e}"),
                             );
                         }
+                        // Sem duplicação válida, `next_frame` responde na hora
+                        // e o laço gira em falso: medido em ~2000 tentativas
+                        // por segundo, queimando um núcleo. O Windows não avisa
+                        // quando sai do Secure Desktop, então não há evento a
+                        // aguardar — só resta espaçar as tentativas.
+                        std::thread::sleep(BACKOFF);
                     }
                 }
             }

@@ -56,6 +56,13 @@ const CAPTURE_TIMEOUT_MS: u32 = 8;
 /// Acima deste acúmulo na fila de saída, o host para de codificar até o link
 /// escoar. Meio megabyte a 3 Mbps já representa mais de um segundo de atraso.
 const BACKLOG_LIMIT: usize = 512 * 1024;
+/// Pausa entre tentativas de recuperar a captura enquanto ela está cega.
+///
+/// Exceção deliberada à decisão D8, que proíbe esperar por relógio: aqui não
+/// há evento algum para aguardar — o Windows não avisa quando sai do Secure
+/// Desktop. Sem esta pausa o laço tenta ~2000 vezes por segundo e queima um
+/// núcleo inteiro durante cada prompt de UAC. Medido.
+const BACKOFF_CEGO: Duration = Duration::from_millis(50);
 
 /// Base de tempo comum. Só faz sentido no modo de processo único.
 static START: OnceLock<Instant> = OnceLock::new();
@@ -709,7 +716,21 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
             }
             Err(CaptureError::AccessLost) => {
                 stats.access_lost += 1;
-                cap.recover()?;
+                if cap.recover().is_err() {
+                    // Falhar aqui é o **caso normal** durante o Secure
+                    // Desktop: prompt de UAC, tela de bloqueio, Ctrl+Alt+Del.
+                    // Medido em 05/08/2026 — acesso negado, 0x80070005.
+                    //
+                    // Antes havia um `?` nesta linha, e o erro derrubava a
+                    // sessão inteira: todo prompt de UAC desconectaria o
+                    // viewer. A sessão precisa sobreviver cega e voltar
+                    // sozinha quando o desktop retornar.
+                    stats.cego += 1;
+                    std::thread::sleep(BACKOFF_CEGO);
+                }
+                // Continua atendendo o transporte mesmo sem imagem: pings e
+                // eventos de entrada não podem parar junto.
+                t.flush()?;
                 continue;
             }
             Err(e) => return Err(e.into()),
@@ -818,6 +839,9 @@ struct HostStats {
     dropped: u64,
     keyframe_requests: u64,
     access_lost: u64,
+    /// Iterações em que a captura estava cega e `recover` não deu conta —
+    /// tipicamente com o Secure Desktop na frente.
+    cego: u64,
     input_events: u64,
     readback_ms: Vec<f64>,
     convert_ms: Vec<f64>,
@@ -852,7 +876,17 @@ impl HostStats {
                 String::new()
             },
             if self.access_lost > 0 {
-                format!(" | sessões perdidas {}", self.access_lost)
+                format!(
+                    " | captura perdida {}{}",
+                    self.access_lost,
+                    if self.cego > 0 {
+                        // Sinal de Secure Desktop: a captura se perdeu e não
+                        // pôde ser recriada. A sessão segue viva, sem imagem.
+                        format!(", cego {}x", self.cego)
+                    } else {
+                        String::new()
+                    }
+                )
             } else {
                 String::new()
             },
