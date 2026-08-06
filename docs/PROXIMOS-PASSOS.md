@@ -154,7 +154,19 @@ entre tentativas. Se der `timed out` agora, é rede de verdade — não a vaga
 
 ---
 
-## Fase 3 — já começou
+## Fase 3 — passo 1 concluído
+
+**A cegueira foi medida.** Resultados, defeitos encontrados e o desenho do
+próximo passo estão em [FASE-3.md](FASE-3.md).
+
+Em resumo: um processo comum não consegue duplicar o Secure Desktop (180
+tentativas, todas com acesso negado), e a cegueira dura exatamente o tempo que
+o prompt fica na tela. A recuperação em si custa menos de 150 ms.
+
+Três defeitos sérios vieram junto, todos corrigidos — o pior deles derrubava a
+sessão inteira em cada prompt de UAC.
+
+## Fase 3 — histórico do início
 
 **Feito e commitado** (`crates/pcshare-capture/src/desktop.rs`): detecção de
 qual desktop recebe entrada (`Default`, `Winlogon`, `Screen-saver`) e de qual

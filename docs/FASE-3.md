@@ -1,0 +1,143 @@
+# Fase 3 — UAC e tela de bloqueio
+
+O que separa um protótipo de um produto de suporte remoto.
+
+---
+
+## Passo 1 — a cegueira, medida
+
+Medido em 05/08/2026, host Windows 11 (i7-4790, HD 4600, 1360×768), com a
+ferramenta `uacwatch` (`crates/pcshare-capture/src/bin/uacwatch.rs`).
+
+Duas execuções, prompt de UAC acionado pela própria ferramenta:
+
+| | Execução 1 | Execução 2 |
+|---|---|---|
+| Secure Desktop ativo | 3804 ms | 5342 ms |
+| **Janela de cegueira** | **3950 ms** | **5347 ms** |
+| Custo da recuperação | 146 ms | 5 ms |
+| `recover()` falhou | 75× | 105× |
+| Recuperou na tentativa | 76 | 106 |
+
+### O que ficou provado
+
+**Um processo comum não consegue duplicar o Secure Desktop.** Todas as 180
+tentativas somadas falharam com `0x80070005` — acesso negado — enquanto o
+desktop `Winlogon` esteve à frente. Assim que o desktop do usuário voltou, a
+recuperação funcionou na primeira tentativa.
+
+Isso valida a decisão D5 com evidência. A arquitetura serviço + agente não é
+preferência de projeto: é a única saída.
+
+**A recuperação em si não é o problema.** Custa entre 5 e 146 ms, e depois
+disso o primeiro quadro chega em menos de 20 ms. A estratégia de insistir está
+correta e já está implementada.
+
+### O que o número esconde, e é pior
+
+A cegueira dura **exatamente o tempo que o prompt fica na tela**. A diferença
+entre as duas execuções — 3,8 s contra 5,3 s — é só quanto o operador demorou
+para clicar.
+
+Numa sessão de suporte real, isso não é uma pausa de quatro segundos. É uma
+pausa **indefinida**:
+
+- o técnico não vê o prompt, então não sabe o que apareceu;
+- não consegue clicar, porque a injeção de entrada também não alcança o
+  Secure Desktop;
+- só quem está fisicamente na máquina pode resolver — e essa pessoa pediu
+  ajuda justamente por não saber o que fazer.
+
+O atendimento trava até alguém do outro lado agir às cegas, por telefone. É o
+pior momento possível para perder a conexão, e é exatamente onde ela se perde
+hoje.
+
+---
+
+## Defeitos que a medição encontrou
+
+Nenhum deles teria aparecido sem rodar o experimento.
+
+### 1. `recover()` falhando inutilizava a captura
+
+Quando `duplicate_output` falhava, o `?` retornava cedo e `self.duplication`
+seguia apontando para o objeto morto. A chamada seguinte quebrava com
+`INVALID_CALL` (`0x887A0001`) — erro que nada diz sobre a causa e que abortou
+a primeira medição.
+
+A duplicação virou `Option`, solta antes da tentativa de recriar. Falhar deixa
+o estado honesto: sem duplicação. `recover()` passou a ser idempotente.
+
+### 2. O host derrubava a sessão em todo prompt de UAC
+
+A linha era `cap.recover()?`. Como `recover()` falha durante o Secure Desktop,
+o erro subia e encerrava a sessão inteira.
+
+Em produção: o cliente clica em algo que pede elevação e o técnico é
+desconectado — no momento em que mais precisaria estar conectado.
+
+O host agora segue cego, insistindo em segundo plano, e continua atendendo o
+transporte para que pings e eventos de entrada não parem junto com a imagem.
+
+### 3. O laço girava em falso
+
+Sem duplicação válida, `next_frame` responde na hora. Medido em ~2000
+tentativas por segundo, queimando um núcleo durante cada prompt. Entrou uma
+pausa de 50 ms entre tentativas.
+
+Exceção deliberada à decisão D8, que proíbe esperar por relógio: aqui não há
+evento a aguardar, porque o Windows não avisa quando sai do Secure Desktop.
+
+### 4. A primeira métrica estava errada
+
+A versão inicial reportou "janela de cegueira: 3 ms" — número que não
+descrevia nada. Ela marcava o fim da cegueira no primeiro quadro que chegasse,
+mas um quadro entregue **durante** o prompt é o desktop do usuário congelado,
+não a tela que a pessoa está vendo.
+
+A cegueira só termina depois que o Secure Desktop sai.
+
+---
+
+## Passo 2 — o que vem agora
+
+Com o problema quantificado, o desenho do serviço + agente pode começar:
+
+```
+pcshare-service.exe    → Windows Service, sessão 0, SYSTEM
+        │                 sobrevive a logoff, alcança o Winlogon
+        │ WTSQueryUserToken + CreateProcessAsUser
+        ▼
+pcshare-agent.exe      → um por desktop ativo
+                         captura, encode, injeta entrada
+                         relançado quando o desktop troca
+```
+
+A linha de base contra a qual comparar já existe: **cegueira igual à duração
+do prompt**. A solução funciona se esse número cair para perto de zero.
+
+O que ainda não se sabe e precisa ser medido depois: quanto tempo leva para
+lançar um agente no desktop `Winlogon` quando a troca acontece. Se for lento, a
+cegueira diminui mas não desaparece.
+
+**Bloqueio conhecido:** instalar um serviço exige elevação, e um serviço não
+assinado dificilmente passa pelo Smart App Control. Ver risco R1 em
+[ARQUITETURA.md](ARQUITETURA.md).
+
+---
+
+## Como repetir a medição
+
+```powershell
+cargo run --release -p pcshare-capture --bin uacwatch
+```
+
+Aciona o prompt sozinho; basta clicar em **Não**. Nada é executado com
+elevação — `cmd /c exit` não faz nada nem se for aceito por engano.
+
+Para a tela de bloqueio (Win+L) ou Ctrl+Alt+Del, que não dão para acionar por
+programa:
+
+```powershell
+cargo run --release -p pcshare-capture --bin uacwatch -- --manual
+```

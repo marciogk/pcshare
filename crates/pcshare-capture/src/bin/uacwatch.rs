@@ -73,6 +73,10 @@ fn main() {
     let mut access_lost = 0u32;
     let mut recover_ok = 0u32;
     let mut recover_falhou = 0u32;
+    // Total de chamadas a `recover`, com ou sem sucesso. O contador de falhas
+    // não serve para numerar tentativas: ele não avança quando dá certo, e
+    // duas recuperações seguidas apareciam com o mesmo número.
+    let mut tentativas = 0u32;
     let mut quadros = 0u64;
     let mut disparado = manual;
 
@@ -134,12 +138,13 @@ fn main() {
                 if access_lost <= 3 || access_lost % 50 == 0 {
                     anotar(&mut eventos, format!("AccessLost #{access_lost}"));
                 }
+                tentativas += 1;
                 match cap.recover() {
                     Ok(()) => {
                         recover_ok += 1;
                         anotar(
                             &mut eventos,
-                            format!("  ^ recover() teve sucesso (tentativa {})", recover_falhou + 1),
+                            format!("  ^ recover() teve sucesso na tentativa {tentativas}"),
                         );
                     }
                     Err(e) => {
