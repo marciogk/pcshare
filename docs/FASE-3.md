@@ -99,7 +99,48 @@ A cegueira só termina depois que o Secure Desktop sai.
 
 ---
 
-## Passo 2 — o que vem agora
+## Passo 2 — o mecanismo de lançamento, provado
+
+Medido em 05/08/2026 com `pcshare-service experimento`, sem privilégio
+elevado.
+
+O supervisor lança um agente preso a um desktop, via
+`STARTUPINFO.lpDesktop`, e o agente relata se consegue capturar dali.
+
+| Caso | Desktop do agente | É o de entrada? | Captura |
+|---|---|---|---|
+| 1 | `Default` | sim | **funcionou** — 195 quadros em 3 s |
+| 2 | `PcshareExperimento` | não | **falhou** — `0x80070005` |
+
+O caso 2 é o controle negativo, e vale tanto quanto o positivo: sem ele, o
+caso 1 não distinguiria "a amarração funciona" de "a amarração é irrelevante".
+
+### O que isso muda no entendimento
+
+**Não há nada de especial no `Winlogon`.** O erro do caso 2 é idêntico ao
+medido durante o prompt de UAC — mesmo `0x80070005`, num desktop comum criado
+por nós. A regra é geral:
+
+> Um processo só duplica a tela quando está preso ao desktop que está
+> recebendo entrada.
+
+O Secure Desktop não é uma exceção com proteção própria; é só mais um desktop
+que não é o nosso. Isso simplifica o desenho: a solução não precisa de nenhum
+tratamento especial para UAC, precisa de **um agente por desktop de entrada**.
+
+### O custo do relançamento
+
+| | |
+|---|---|
+| Primeiro lançamento (disco frio) | 617,7 ms |
+| Segundo lançamento (quente) | **7,5 ms** |
+
+Em produção o binário já estará quente. **7,5 ms contra 4 a 5 segundos de
+cegueira** — ordens de grandeza de folga. O relançamento não vai ser o gargalo.
+
+---
+
+## Passo 3 — o que vem agora
 
 Com o problema quantificado, o desenho do serviço + agente pode começar:
 
@@ -116,9 +157,17 @@ pcshare-agent.exe      → um por desktop ativo
 A linha de base contra a qual comparar já existe: **cegueira igual à duração
 do prompt**. A solução funciona se esse número cair para perto de zero.
 
-O que ainda não se sabe e precisa ser medido depois: quanto tempo leva para
-lançar um agente no desktop `Winlogon` quando a troca acontece. Se for lento, a
-cegueira diminui mas não desaparece.
+O custo do relançamento já foi medido — 7,5 ms com o binário quente — e não
+será o gargalo.
+
+O que resta desconhecido, e só se resolve com o serviço instalado:
+
+- o serviço consegue de fato abrir e amarrar um agente ao `Winlogon`? A
+  mecânica está provada para desktops comuns, mas o `Winlogon` tem descritor
+  de segurança próprio;
+- quanto tempo o supervisor leva para **perceber** a troca de desktop. Hoje a
+  detecção é por consulta em laço; se for lenta, ela vira o novo gargalo, não
+  o lançamento.
 
 **Bloqueio conhecido:** instalar um serviço exige elevação, e um serviço não
 assinado dificilmente passa pelo Smart App Control. Ver risco R1 em

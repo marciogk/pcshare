@@ -729,6 +729,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pcshare-agent"
+version = "0.0.1"
+dependencies = [
+ "pcshare-capture",
+]
+
+[[package]]
 name = "pcshare-capture"
 version = "0.0.1"
 dependencies = [
@@ -762,6 +769,14 @@ dependencies = [
 name = "pcshare-gpu"
 version = "0.0.1"
 dependencies = [
+ "windows",
+]
+
+[[package]]
+name = "pcshare-service"
+version = "0.0.1"
+dependencies = [
+ "pcshare-capture",
  "windows",
 ]
 
