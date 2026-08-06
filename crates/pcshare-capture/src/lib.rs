@@ -95,7 +95,13 @@ pub struct DesktopCapture {
     gpu: Arc<GpuContext>,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
-    duplication: IDXGIOutputDuplication,
+    /// `None` enquanto não há duplicação válida.
+    ///
+    /// Depois de `DXGI_ERROR_ACCESS_LOST` o objeto está morto e chamá-lo de
+    /// novo devolve `INVALID_CALL`, um erro que não diz nada sobre a causa
+    /// real. Guardar `None` faz [`Self::next_frame`] responder `AccessLost`
+    /// de imediato, que é a verdade e diz ao chamador o que fazer.
+    duplication: Option<IDXGIOutputDuplication>,
     /// Textura em memória acessível pela CPU. Criada uma vez e reaproveitada:
     /// alocar por frame no caminho quente seria desperdício puro.
     staging: Option<ID3D11Texture2D>,
@@ -131,7 +137,7 @@ impl DesktopCapture {
                 gpu,
                 device,
                 context,
-                duplication,
+                duplication: Some(duplication),
                 staging: None,
                 current: None,
                 desc,
@@ -164,36 +170,61 @@ impl DesktopCapture {
     }
 
     /// Recria a sessão após `CaptureError::AccessLost`, reaproveitando o device.
+    ///
+    /// **Pode ser chamada quantas vezes for preciso.** Falhar aqui é o caso
+    /// esperado enquanto o Secure Desktop está na frente: um processo comum
+    /// recebe acesso negado ao tentar duplicá-lo. Medido em 05/08/2026 durante
+    /// um prompt de UAC — `0x80070005`, acesso negado.
+    ///
+    /// A versão anterior deixava a duplicação morta no lugar quando falhava, e
+    /// a chamada seguinte quebrava com `INVALID_CALL`, escondendo a causa real
+    /// atrás de um erro sem sentido. Agora o objeto morto é solto antes da
+    /// tentativa, e o chamador pode simplesmente insistir até o desktop voltar.
     pub fn recover(&mut self) -> Result<(), CaptureError> {
         self.frame_held = false;
         self.current = None;
+        // Solta a duplicação morta antes de tentar: se a tentativa falhar,
+        // ficamos sem duplicação, que é a verdade.
+        self.duplication = None;
+
         unsafe {
-            self.duplication = Self::duplicate_output(&self.device, self.output_index)?;
-            self.desc = self.duplication.GetDesc();
+            let nova = Self::duplicate_output(&self.device, self.output_index)?;
+            self.desc = nova.GetDesc();
+            self.duplication = Some(nova);
         }
         // A resolução pode ter mudado — foi um dos motivos da perda de sessão.
         self.staging = None;
         Ok(())
     }
 
+    /// `true` quando há duplicação válida. `false` significa que `recover`
+    /// precisa ter sucesso antes de qualquer captura.
+    pub fn is_active(&self) -> bool {
+        self.duplication.is_some()
+    }
+
     /// Aguarda o próximo frame. `Ok(None)` significa que nada mudou na tela
     /// dentro do timeout — o caso comum e desejável numa tela parada.
     pub fn next_frame(&mut self, timeout_ms: u32) -> Result<Option<FrameStats>, CaptureError> {
+        // Sem duplicação viva não há o que capturar, e insistir numa que
+        // morreu produz `INVALID_CALL` — erro que esconde a causa.
+        let dup = self
+            .duplication
+            .clone()
+            .ok_or(CaptureError::AccessLost)?;
+
         unsafe {
             // A API exige liberar o frame anterior antes de pedir o próximo.
             if self.frame_held {
                 self.current = None;
-                self.duplication.ReleaseFrame()?;
+                dup.ReleaseFrame()?;
                 self.frame_held = false;
             }
 
             let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut resource: Option<IDXGIResource> = None;
 
-            match self
-                .duplication
-                .AcquireNextFrame(timeout_ms, &mut info, &mut resource)
-            {
+            match dup.AcquireNextFrame(timeout_ms, &mut info, &mut resource) {
                 Ok(()) => {}
                 Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(None),
                 Err(e) => return Err(e.into()),
@@ -324,15 +355,13 @@ impl DesktopCapture {
     /// Aproveitá-las de fato — mandando o deslocamento em vez dos pixels — é
     /// otimização de banda para a Fase 1.
     unsafe fn count_move_rects(&mut self) -> Result<u32, CaptureError> {
+        let dup = self.duplication.clone().ok_or(CaptureError::AccessLost)?;
         unsafe {
             let mut buf = [DXGI_OUTDUPL_MOVE_RECT::default(); 64];
             let mut needed: u32 = 0;
             let capacity = (std::mem::size_of_val(&buf)) as u32;
 
-            match self
-                .duplication
-                .GetFrameMoveRects(capacity, buf.as_mut_ptr(), &mut needed)
-            {
+            match dup.GetFrameMoveRects(capacity, buf.as_mut_ptr(), &mut needed) {
                 Ok(()) => Ok(needed / std::mem::size_of::<DXGI_OUTDUPL_MOVE_RECT>() as u32),
                 // Buffer pequeno: não vale crescer, já sabemos que houve
                 // movimento, que é tudo que a decisão precisa.
@@ -345,13 +374,17 @@ impl DesktopCapture {
     /// A API informa o tamanho necessário quando o buffer é pequeno, então
     /// crescemos sob demanda e reaproveitamos nas chamadas seguintes.
     unsafe fn read_dirty_rects(&mut self) -> Result<(), CaptureError> {
+        let dup = self
+            .duplication
+            .clone()
+            .ok_or(CaptureError::AccessLost)?;
         unsafe {
             loop {
                 let capacity_bytes =
                     (self.dirty_buf.capacity() * std::mem::size_of::<RECT>()) as u32;
                 let mut needed_bytes: u32 = 0;
 
-                let result = self.duplication.GetFrameDirtyRects(
+                let result = dup.GetFrameDirtyRects(
                     capacity_bytes,
                     self.dirty_buf.as_mut_ptr(),
                     &mut needed_bytes,
@@ -377,9 +410,11 @@ impl DesktopCapture {
 
 impl Drop for DesktopCapture {
     fn drop(&mut self) {
-        if self.frame_held {
+        if self.frame_held
+            && let Some(dup) = &self.duplication
+        {
             unsafe {
-                let _ = self.duplication.ReleaseFrame();
+                let _ = dup.ReleaseFrame();
             }
         }
     }
