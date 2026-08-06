@@ -17,10 +17,50 @@
 //! se a captura abre ali. É o que prova o mecanismo de lançamento antes de
 //! mover a pipeline inteira para dentro dele.
 
+use std::io::Write;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use pcshare_capture::desktop;
 use pcshare_capture::DesktopCapture;
+use pcshare_capture::desktop;
+
+/// Registra em arquivo, e no console **se** houver um.
+///
+/// O agente é lançado pelo supervisor sem console. Nesse contexto `println!`
+/// entra em pânico ao falhar a escrita, e o processo morre no primeiro relato
+/// — foi exatamente o que aconteceu: o supervisor relançava o agente a cada
+/// 100 ms sem perceber que ele nascia e morria.
+fn log(rotulo: &str, msg: &str) {
+    let linha = format!("[{rotulo}] {msg}\n");
+    // Ignora falha de propósito: sem console não há para onde escrever, e
+    // isso não é motivo para derrubar o agente.
+    let _ = std::io::stdout().write_all(linha.as_bytes());
+    let _ = std::io::stdout().flush();
+
+    let caminho = caminho_do_log(rotulo);
+    if let Some(dir) = caminho.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&caminho)
+    {
+        let _ = f.write_all(linha.as_bytes());
+    }
+}
+
+fn caminho_do_log(rotulo: &str) -> PathBuf {
+    // `ProgramData` porque o agente pode nascer de um serviço SYSTEM, que não
+    // tem perfil de usuário.
+    let seguro: String = rotulo
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+    PathBuf::from(std::env::var("ProgramData").unwrap_or_else(|_| "C:\\".into()))
+        .join("PCShare")
+        .join(format!("agente-{seguro}.log"))
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -38,21 +78,24 @@ fn main() {
 
     let (sessao, console) = desktop::sessions();
 
-    println!("=== agente [{rotulo}] ===");
-    println!("pid            : {}", std::process::id());
-    println!("sessão         : {sessao}  (console: {console})");
-    println!("desktop de entrada: {}", desktop::input_desktop().label());
+    log(&rotulo, "=== início ===");
+    log(&rotulo, &format!("pid {}", std::process::id()));
+    log(&rotulo, &format!("sessão {sessao} (console: {console})"));
+    log(
+        &rotulo,
+        &format!("desktop de entrada: {}", desktop::input_desktop().label()),
+    );
 
     // A pergunta que o passo 2 precisa responder: a captura funciona a partir
     // daqui? No desktop do usuário, sim. No Winlogon, só se o agente tiver
     // sido lançado pelo serviço com privilégio de SYSTEM.
     let mut cap = match DesktopCapture::new(0) {
         Ok(c) => {
-            println!("captura        : ABRIU  {}x{}", c.width(), c.height());
+            log(&rotulo, &format!("captura ABRIU {}x{}", c.width(), c.height()));
             Some(c)
         }
         Err(e) => {
-            println!("captura        : FALHOU  {e}");
+            log(&rotulo, &format!("captura FALHOU: {e}"));
             None
         }
     };
@@ -60,10 +103,25 @@ fn main() {
     // Prova que a captura não só abre, mas entrega quadros de fato — abrir e
     // nunca receber nada seria um falso positivo.
     if let Some(cap) = cap.as_mut() {
-        let ate = Instant::now() + Duration::from_secs(segundos.min(30));
+        // `--segundos 0` roda até ser encerrado: é como o supervisor usa o
+        // agente, já que quem decide o fim da vida dele é a troca de desktop.
+        let perpetuo = segundos == 0;
+        let ate = Instant::now() + Duration::from_secs(segundos.clamp(1, 3600));
         let mut quadros = 0u32;
         let mut perdas = 0u32;
-        while Instant::now() < ate {
+        let mut proximo_relato = Instant::now() + Duration::from_secs(2);
+
+        while perpetuo || Instant::now() < ate {
+            if perpetuo && Instant::now() >= proximo_relato {
+                log(
+                    &rotulo,
+                    &format!(
+                        "vivo em '{}' | {quadros} quadros | {perdas} perdas",
+                        desktop::input_desktop().label()
+                    ),
+                );
+                proximo_relato += Duration::from_secs(2);
+            }
             match cap.next_frame(100) {
                 Ok(Some(_)) => quadros += 1,
                 Ok(None) => {}
@@ -74,16 +132,19 @@ fn main() {
                 }
             }
         }
-        println!("quadros em {segundos}s : {quadros}  (perdas de sessão: {perdas})");
-        println!(
-            "veredito       : {}",
+        log(
+            &rotulo,
+            &format!("quadros {quadros} (perdas de sessão: {perdas})"),
+        );
+        log(
+            &rotulo,
             if quadros > 0 {
-                "CAPTURA FUNCIONA NESTE DESKTOP"
+                "veredito: CAPTURA FUNCIONA NESTE DESKTOP"
             } else {
-                "abriu mas não entregou nada"
+                "veredito: abriu mas não entregou nada"
             }
         );
     }
 
-    println!("=== fim do agente [{rotulo}] ===");
+    log(&rotulo, "=== fim ===");
 }

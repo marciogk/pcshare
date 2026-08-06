@@ -140,7 +140,51 @@ cegueira** — ordens de grandeza de folga. O relançamento não vai ser o garga
 
 ---
 
-## Passo 3 — o que vem agora
+## Passo 3 — supervisor e serviço, implementados
+
+`pcshare-service` ganhou três modos além do experimento:
+
+| Comando | O que faz | Precisa de admin? |
+|---|---|---|
+| `supervisor` | o laço completo, como usuário comum | não |
+| `instalar` | registra o serviço (início **manual**) | sim |
+| `desinstalar` | remove o serviço | sim |
+| *(sem argumento)* | entrega o processo ao Gerenciador de Serviços | — |
+
+O laço observa o desktop de entrada a cada 50 ms e, quando ele muda, mata o
+agente e lança outro amarrado ao desktop novo. Não há como reconfigurar um
+processo já rodando: ele nasce preso a um desktop.
+
+Verificado em modo console: um agente, vivo, **598 quadros em 10 s** (~60 fps),
+sem relançamentos espúrios.
+
+### Dois defeitos que o primeiro teste do supervisor revelou
+
+**1. O agente morria ao nascer.** Lançado com `CREATE_NO_WINDOW`, ficava sem
+console, e o primeiro `println!` entrava em pânico — em Rust, `println!` aborta
+quando a escrita falha. O supervisor relançava a cada 100 ms sem perceber.
+
+Um processo lançado por serviço não pode depender de console. O agente passou a
+registrar em `C:\ProgramData\PCShare\agente-<desktop>.log`, ignorando falha de
+escrita no console.
+
+**2. O log confundia os dois motivos de relançamento.** A mensagem dizia
+"desktop mudou: Default -> Default", que não faz sentido e escondeu o defeito
+acima. Relançar porque o desktop mudou é funcionamento normal; relançar porque
+o agente morreu é sintoma. Agora aparecem separados.
+
+### O que só a instalação vai responder
+
+- O `Winlogon` aceita `CreateProcessAsUserW` com `lpDesktop`? Ele tem
+  descritor de segurança próprio, e é o último ponto onde ainda cabe surpresa.
+- `WTSQueryUserToken` funciona da sessão 0 nesta máquina?
+- Quanto tempo o supervisor leva para **perceber** a troca — hoje o limite
+  superior é o intervalo de consulta, 50 ms, contra os 4 a 5 segundos de
+  cegueira atuais.
+
+---
+
+## Passo 4 — o que vem agora
 
 Com o problema quantificado, o desenho do serviço + agente pode começar:
 

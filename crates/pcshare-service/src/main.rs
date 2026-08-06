@@ -27,7 +27,19 @@
 //! Só o acesso ao `Winlogon` exige SYSTEM, e portanto o serviço instalado.
 //!
 //!     cargo run --release -p pcshare-service -- experimento
+//!     cargo run --release -p pcshare-service -- supervisor
+//!
+//! E, com PowerShell **como administrador**:
+//!
+//!     pcshare-service.exe instalar
+//!     Start-Service PCShareSupervisor
+//!     Stop-Service  PCShareSupervisor
+//!     pcshare-service.exe desinstalar
 
+mod servico;
+mod supervisor;
+
+use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
@@ -47,13 +59,63 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("experimento") => experimento(),
-        _ => {
-            println!("PCShare — supervisor de agentes\n");
-            println!("  experimento   prova o lançamento amarrado a desktop");
-            println!("\nO modo de serviço, que exige instalação com elevação,");
-            println!("vem no próximo passo.");
+
+        // Mesmo laço do serviço, mas como usuário comum. Serve para exercitar
+        // tudo menos o `Winlogon`, que exige SYSTEM.
+        Some("supervisor") => {
+            static PARAR: AtomicBool = AtomicBool::new(false);
+            let _ = ctrl_c(&PARAR);
+            println!("Supervisor em modo console. Ctrl+C para encerrar.");
+            println!("Log em {}\n", supervisor::caminho_do_log().display());
+            supervisor::supervisionar(supervisor::Modo::Console, &PARAR);
         }
+
+        Some("instalar") => match servico::instalar() {
+            Ok(()) => {
+                println!("serviço instalado como 'PCShareSupervisor' (início manual)");
+                println!("inicie com:  Start-Service PCShareSupervisor");
+                println!("log em:      {}", supervisor::caminho_do_log().display());
+            }
+            Err(e) => eprintln!("falha ao instalar: {e}"),
+        },
+
+        Some("desinstalar") => match servico::desinstalar() {
+            Ok(()) => println!("serviço removido"),
+            Err(e) => eprintln!("falha ao remover: {e}"),
+        },
+
+        // Sem argumento: é assim que o Gerenciador de Serviços nos inicia.
+        // Rodando pela linha de comando, a entrega falha — e a falha é o modo
+        // de descobrir que se está no contexto errado.
+        None => {
+            if let Err(e) = servico::rodar_como_servico() {
+                println!("PCShare — supervisor de agentes\n");
+                println!("  experimento    prova o lançamento amarrado a desktop");
+                println!("  supervisor     roda o laço como usuário comum");
+                println!("  instalar       registra o serviço (requer admin)");
+                println!("  desinstalar    remove o serviço (requer admin)");
+                println!("\n(não fui iniciado como serviço: {e})");
+            }
+        }
+
+        Some(outro) => eprintln!("comando desconhecido: {outro}"),
     }
+}
+
+/// Encerra o laço no Ctrl+C em vez de matar o processo, para que o agente
+/// filho seja derrubado junto e não fique órfão.
+fn ctrl_c(parar: &'static AtomicBool) -> Result<(), String> {
+    use windows::Win32::System::Console::SetConsoleCtrlHandler;
+    static ALVO: std::sync::OnceLock<&'static AtomicBool> = std::sync::OnceLock::new();
+    let _ = ALVO.set(parar);
+
+    unsafe extern "system" fn handler(_: u32) -> windows::core::BOOL {
+        if let Some(p) = ALVO.get() {
+            p.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        true.into()
+    }
+    unsafe { SetConsoleCtrlHandler(Some(handler), true).map_err(|e| e.to_string()) }
 }
 
 /// Prova, sem elevação, que a amarração a desktop é o que decide a captura.
