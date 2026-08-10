@@ -1,50 +1,69 @@
 # Próximos passos
 
-Atualizado em 03/08/2026, ao encerrar.
+Atualizado em 10/08/2026, ao encerrar.
 
 ---
 
-## 🔴 PRIMEIRO DE TUDO: o desenvolvimento está bloqueado
+## Onde paramos
 
-O Smart App Control está **ligado** e impede compilar em release, rodar testes
-e executar qualquer binário. Só compilar em debug ainda funciona, o que não
-permite verificar nada.
+**A Fase 3 está resolvida no essencial.** A arquitetura serviço + agente
+funciona, e a cegueira durante um prompt de UAC caiu de **4600 ms para 91 ms**
+— 50 vezes. Resultados e caminho completo em [FASE-3.md](FASE-3.md).
 
-A mensagem do Windows nomeia a causa: *"não é possível confirmar quem publicou
-`pcshare.exe`"* — falta de assinatura digital. Ver a captura em
-[ARQUITETURA.md](ARQUITETURA.md), risco R1.
+### Ambiente, como ficou
 
-**Desligar antes de qualquer outra coisa:**
+| | |
+|---|---|
+| Smart App Control | **desligado** (`0`) — desenvolvimento desimpedido |
+| Serviço `PCShareSupervisor` | instalado, **parado**, início manual |
+| Processos soltos | nenhum |
+| Testes | 35, todos passando |
 
-```
-Tecla Windows → "Segurança do Windows" → Enter
-→ Controle de aplicativo e navegador
-→ Configurações de Controle Inteligente de Aplicativos
-→ Desativado
-```
-
-Conferir (tem de responder `0`):
+Para religar o serviço quando voltar, num PowerShell **como administrador**:
 
 ```powershell
-(Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy").VerifiedAndReputablePolicyState
-```
-
-Depois, reconstruir o que a limpeza apagou:
-
-```powershell
+Start-Service PCShareSupervisor
+# ... provocar prompts de UAC ...
+Stop-Service PCShareSupervisor
 cd "c:\Projeto Pcshare"
-cargo build --release --workspace
-cargo test --workspace
+.\target\release\pcshare-service.exe analisar
 ```
 
-> **Lição registrada:** foi um `cargo clean --release` que disparou isso. A
-> limpeza invalidou artefatos que já tinham reputação, e cada script de
-> compilação virou executável de hash inédito. Com o Smart App Control ligado,
-> **não limpar o perfil release**.
+> **Lição registrada:** com o Smart App Control ligado, **nunca rodar
+> `cargo clean --release`**. A limpeza invalida artefatos que já tinham
+> reputação, e cada script de compilação vira executável de hash inédito — o
+> que travou o desenvolvimento por completo em 03/08.
 
-> Vale manter esta máquina como a única que reproduz a experiência real do
-> cliente: religar o Smart App Control depois, para testar o instalador
-> assinado quando houver certificado.
+> Vale religar o Smart App Control quando houver certificado, para testar o
+> instalador assinado. Esta é a única máquina que reproduz a experiência do
+> cliente.
+
+---
+
+## O que vem a seguir
+
+### 1. Migrar a pipeline para o agente 🔴 o maior em volume
+
+O agente hoje só prova que captura. Falta mover para dentro dele o que já
+existe e funciona em `pcshare-spike`: encode, transporte e injeção de entrada.
+
+**Decisão de projeto que precisa vir antes:** a sessão de rede — QUIC,
+handshake Noise, ID e senha — tem de viver no **supervisor**, não no agente.
+Toda troca de desktop mata e recria agentes; se a sessão morar neles, cada
+prompt de UAC derrubaria o viewer, desfazendo tudo o que a Fase 3 conquistou.
+
+Isso implica passar quadros do agente para o supervisor — memória
+compartilhada ou o canal por named pipe que já existe.
+
+### 2. Tela de bloqueio e Ctrl+Alt+Del 🟢
+
+Mesma mecânica já provada, episódios mais longos. Baixo risco.
+
+### 3. Reduzir os 90 ms restantes 🟡 retorno pequeno
+
+Quase todos são a pausa de 50 ms entre tentativas de recuperar a captura no
+agente ocioso. Baixá-la reduziria quase na mesma proporção, mas com três ou
+quatro agentes vivos a conta de CPU muda. Medir antes de mexer.
 
 ---
 
