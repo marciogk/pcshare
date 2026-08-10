@@ -5,6 +5,7 @@
 //! o frame anterior. Numa tela de escritório parada quase nenhum pixel muda,
 //! e codificar a tela inteira a 30 fps desperdiça banda e CPU.
 
+pub mod canal;
 pub mod desktop;
 pub mod linha_do_tempo;
 
