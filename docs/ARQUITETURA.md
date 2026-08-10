@@ -301,6 +301,20 @@ Guardar esta captura tem um propósito: **é exatamente a tela que o cliente
 veria** ao instalar o produto sem certificado. Serve de argumento pronto quando
 o custo do certificado for discutido.
 
+> **Agravante observado em 10/08/2026: o Smart App Control bloqueia o
+> *serviço*.** O log de eventos do Windows registra, no evento 7000: *"Não foi
+> possível iniciar o serviço PCShare — supervisor de agentes devido ao
+> seguinte erro: Uma política de Controle de Aplicativo bloqueou este
+> arquivo."*
+>
+> Com executáveis comuns o bloqueio era intermitente; com o serviço foi
+> consistente, seis tentativas seguidas. E é o pior lugar para acontecer: o
+> serviço é justamente a peça que precisa estar instalada na máquina do
+> cliente para o UAC funcionar.
+>
+> Isso eleva a assinatura de código de "custo de lançamento" para
+> **pré-requisito da Fase 3 em produção**.
+
 **Desligar o Smart App Control é solução de bancada, não do produto.** Vale a
 pena ser explícito porque a leitura contrária inviabilizaria o negócio: nenhum
 cliente vai mexer em configuração de segurança, e o cliente típico de suporte
