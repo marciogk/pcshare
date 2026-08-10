@@ -76,6 +76,20 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(5);
 
+    // A qual desktop este agente foi amarrado no nascimento. É contra isto
+    // que se compara o desktop de entrada para detectar a troca.
+    let vinculo = args
+        .iter()
+        .position(|a| a == "--desktop")
+        .and_then(|i| args.get(i + 1).cloned())
+        .unwrap_or_else(|| rotulo.clone());
+    let codigo_do_vinculo = match vinculo.as_str() {
+        "Default" => desktop::codigo::DEFAULT,
+        "Winlogon" => desktop::codigo::WINLOGON,
+        "Screen-saver" => desktop::codigo::SCREENSAVER,
+        _ => desktop::codigo::OUTRO,
+    };
+
     let (sessao, console) = desktop::sessions();
 
     log(&rotulo, "=== início ===");
@@ -112,13 +126,31 @@ fn main() {
         let mut proximo_relato = Instant::now() + Duration::from_secs(2);
 
         while perpetuo || Instant::now() < ate {
-            if perpetuo && Instant::now() >= proximo_relato {
+            // O agente está preso a um desktop e não pode trocar. Quando o
+            // desktop de entrada vira outro, ele deixa de servir para
+            // qualquer coisa: fica cego, acumulando perdas.
+            //
+            // Observado: 78 quadros congelados e as perdas subindo para
+            // sempre, porque ninguém o encerrou. Quem percebe a troca é ele
+            // — o supervisor, na sessão 0, não enxerga desktop nenhum. Então
+            // é ele quem avisa, encerrando com o código do desktop novo.
+            let agora = desktop::input_desktop();
+            if perpetuo && desktop::codigo::de(&agora) != codigo_do_vinculo {
                 log(
                     &rotulo,
                     &format!(
-                        "vivo em '{}' | {quadros} quadros | {perdas} perdas",
-                        desktop::input_desktop().label()
+                        "desktop de entrada virou '{}' — encerrando para o supervisor \
+                         lançar outro ({quadros} quadros, {perdas} perdas)",
+                        agora.label()
                     ),
+                );
+                std::process::exit(desktop::codigo::de(&agora) as i32);
+            }
+
+            if perpetuo && Instant::now() >= proximo_relato {
+                log(
+                    &rotulo,
+                    &format!("vivo em '{}' | {quadros} quadros | {perdas} perdas", agora.label()),
                 );
                 proximo_relato += Duration::from_secs(2);
             }

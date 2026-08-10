@@ -184,7 +184,64 @@ o agente morreu é sintoma. Agora aparecem separados.
 
 ---
 
-## Passo 4 — o que vem agora
+## Passo 4 — o Secure Desktop capturado, e quem enxerga o quê
+
+Primeiro teste do serviço instalado, 06/08/2026.
+
+### A conquista
+
+```
+[Winlogon] desktop de entrada: Winlogon (Secure Desktop)
+[Winlogon] captura ABRIU 1360x768
+[Winlogon] vivo em 'Default' | 78 quadros
+```
+
+**78 quadros capturados do Secure Desktop.** É o núcleo da Fase 3 resolvido.
+
+O que fez funcionar: para o `Winlogon`, o agente precisa nascer como **SYSTEM
+dentro da sessão do usuário**. O serviço duplica o próprio token, realoca a
+cópia para a sessão do console e cria o processo com ela.
+
+Passar o token do usuário — que era o que fazíamos — cria o processo e devolve
+um PID, mas ele morre antes da primeira instrução: o arquivo de log do agente
+nunca chegou a existir. O `Winlogon` pertence ao Windows, não a quem está
+logado.
+
+### O defeito arquitetural que o teste revelou
+
+O contador congelou em 78 quadros com as perdas subindo para sempre, e o
+supervisor relançou um agente do `Winlogon` a cada 3 segundos, indefinidamente
+— mesmo depois de o usuário voltar ao desktop normal.
+
+**Porque o supervisor, na sessão 0, é cego.** A sessão 0 tem estação de janelas
+própria: `OpenInputDesktop` sempre falha lá, e nosso código lia essa falha como
+"provável Secure Desktop". Ele acreditava que o `Winlogon` nunca saía.
+
+Quem enxerga é o **agente**, que vive na sessão do usuário — e ele viu certo:
+`Winlogon` primeiro, `Default` depois.
+
+### A inversão de responsabilidade
+
+O supervisor **não consulta mais o desktop**. Ele mantém um alvo e obedece ao
+agente:
+
+1. o agente nasce sabendo a que desktop foi amarrado;
+2. ele compara com o desktop de entrada, que só ele consegue ler;
+3. ao divergir, encerra com um **código de saída** que nomeia o desktop novo;
+4. o supervisor lê o código e lança o próximo agente no destino certo.
+
+Resolve sem inventar canal de comunicação entre os processos. Verificado: o
+agente amarrado ao `Winlogon` num sistema em `Default` encerra com código 10.
+
+Também entrou recuo exponencial para morte rápida do agente — sem ele, um
+agente que morre ao nascer vira bomba de processos: cerca de 20 por segundo,
+com o log inflando para 1,8 MB em minutos.
+
+Depois da correção: 1 agente, 7 linhas de log em 10 segundos.
+
+---
+
+## Passo 5 — o que vem agora
 
 Com o problema quantificado, o desenho do serviço + agente pode começar:
 

@@ -61,19 +61,38 @@ pub fn supervisionar(modo: Modo, parar: &AtomicBool) {
     let mut trocas = 0u64;
     let mut mortes_rapidas = 0u32;
 
-    while !parar.load(Ordering::Relaxed) {
-        let desktop_agora = desktop::input_desktop();
+    // O alvo começa no desktop do usuário, que é o caso comum. A partir daí
+    // quem manda é o agente: o supervisor **não** consulta o desktop.
+    //
+    // Não é preguiça, é impossibilidade. Rodando na sessão 0, que tem estação
+    // de janelas própria, `OpenInputDesktop` sempre falha aqui. A versão
+    // anterior lia essa falha como "Secure Desktop ativo" e ficou relançando
+    // um agente do Winlogon a cada 3 segundos, para sempre, mesmo com o
+    // usuário de volta ao desktop normal.
+    let mut alvo = InputDesktop::Default;
 
+    while !parar.load(Ordering::Relaxed) {
         // Distinguir os dois motivos importa: relançar porque o desktop mudou
         // é o funcionamento normal; relançar porque o agente morreu é sintoma
         // de defeito. Confundir os dois escondeu, por um tempo, um agente que
         // nascia e morria 10 vezes por segundo.
-        let motivo = match &atual {
+        let mut motivo = match &atual {
             None => Some("primeiro agente"),
-            Some(a) if a.desktop != desktop_agora => Some("desktop mudou"),
-            Some(a) if !a.vivo() => Some("agente morreu"),
+            Some(a) if !a.vivo() => Some("agente encerrou"),
             Some(_) => None,
         };
+
+        // O código de saída é o recado: dentro da tabela significa "o desktop
+        // de entrada virou este"; fora dela, o agente simplesmente morreu.
+        if motivo.is_some()
+            && let Some(a) = &atual
+            && let Some(novo) = a.codigo_de_saida().and_then(desktop::codigo::para)
+            && novo != alvo
+        {
+            alvo = novo;
+            motivo = Some("agente informou troca de desktop");
+        }
+        let desktop_agora = alvo.clone();
 
         if let Some(motivo) = motivo {
             let percebido = Instant::now();
@@ -157,10 +176,25 @@ struct AgenteVivo {
 
 impl AgenteVivo {
     fn vivo(&self) -> bool {
+        self.codigo_bruto().is_none()
+    }
+
+    /// `None` enquanto o processo roda.
+    fn codigo_bruto(&self) -> Option<u32> {
         use windows::Win32::System::Threading::GetExitCodeProcess;
         const STILL_ACTIVE: u32 = 259;
         let mut code = 0u32;
-        unsafe { GetExitCodeProcess(self.processo, &mut code).is_ok() && code == STILL_ACTIVE }
+        unsafe {
+            if GetExitCodeProcess(self.processo, &mut code).is_ok() && code != STILL_ACTIVE {
+                Some(code)
+            } else {
+                None
+            }
+        }
+    }
+
+    fn codigo_de_saida(&self) -> Option<u32> {
+        self.codigo_bruto()
     }
 
     fn encerrar(self) {
@@ -182,7 +216,7 @@ fn lancar(exe: &Path, desktop: &InputDesktop, modo: Modo) -> Result<AgenteVivo, 
     };
 
     let mut linha = wide(&format!(
-        "\"{}\" --rotulo {alvo} --segundos 0",
+        "\"{}\" --rotulo {alvo} --desktop {alvo} --segundos 0",
         exe.display()
     ));
     let mut desk = wide(&caminho_desktop);

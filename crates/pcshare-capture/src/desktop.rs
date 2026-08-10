@@ -109,6 +109,48 @@ pub fn input_desktop() -> InputDesktop {
     }
 }
 
+/// Como o agente conta ao supervisor qual desktop assumiu.
+///
+/// # Por que via código de saída
+///
+/// O supervisor roda na sessão 0, que tem estação de janelas própria: de lá
+/// `OpenInputDesktop` **sempre** falha, e ele não tem como saber qual desktop
+/// está ativo. Medido — o serviço relançava um agente do `Winlogon` a cada 3
+/// segundos para sempre, convencido de que o Secure Desktop nunca saía.
+///
+/// Quem enxerga é o agente, que vive na sessão do usuário. Então ele é quem
+/// informa: percebe a troca, encerra, e o código de saída diz para onde ir.
+/// Resolve sem inventar canal de comunicação entre os dois processos.
+pub mod codigo {
+    use super::InputDesktop;
+
+    pub const DEFAULT: u32 = 10;
+    pub const WINLOGON: u32 = 11;
+    pub const SCREENSAVER: u32 = 12;
+    pub const OUTRO: u32 = 13;
+
+    pub fn de(d: &InputDesktop) -> u32 {
+        match d {
+            InputDesktop::Default => DEFAULT,
+            // `Denied` é o que um processo comum vê quando o Secure Desktop
+            // está à frente; para efeito de destino, é o mesmo.
+            InputDesktop::Winlogon | InputDesktop::Denied => WINLOGON,
+            InputDesktop::ScreenSaver => SCREENSAVER,
+            InputDesktop::Other(_) => OUTRO,
+        }
+    }
+
+    pub fn para(c: u32) -> Option<InputDesktop> {
+        match c {
+            DEFAULT => Some(InputDesktop::Default),
+            WINLOGON => Some(InputDesktop::Winlogon),
+            SCREENSAVER => Some(InputDesktop::ScreenSaver),
+            // Saída fora da tabela é morte do agente, não troca de desktop.
+            _ => None,
+        }
+    }
+}
+
 /// Sinal complementar: com o Secure Desktop ativo, um processo do desktop do
 /// usuário não enxerga janela em primeiro plano.
 ///
