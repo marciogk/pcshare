@@ -320,7 +320,60 @@ pelo código de saída. É a próxima decisão de projeto.
 
 ---
 
-## Passo 7 — o que vem agora
+## Passo 7 — agentes persistentes, e a assimetria eliminada
+
+Medido em 10/08/2026, seis transições, serviço instalado.
+
+| | Sem serviço | Agentes descartáveis | **Agentes persistentes** |
+|---|---|---|---|
+| Default → Winlogon | ~4600 ms | 210 ms | **60–91 ms** |
+| Winlogon → Default | ~4600 ms | 770 ms | **84–96 ms** |
+| Mediana | ~4600 ms | 758 ms | **91 ms** |
+
+Redução total de **50×** sobre a linha de base, e de **8,4×** no sentido que
+era o gargalo.
+
+### O que mudou
+
+Os 700 ms de criação de processo com token de usuário saíram do caminho
+crítico. O agente não morre mais para relatar a troca: avisa pelo canal, segue
+vivo, fica cego enquanto o desktop não é o dele e volta a capturar sozinho.
+
+Um detalhe confirma o mecanismo: a **primeira** janela medida foi a mais lenta,
+168 ms, porque ali o agente do `Winlogon` ainda precisou nascer. Da terceira em
+diante ele já existia, e os tempos caíram para 60–91 ms.
+
+### O que ainda dá para ganhar
+
+Os ~90 ms restantes são dominados pela pausa de 50 ms entre tentativas de
+recuperar a captura, dentro do agente ocioso. Baixá-la reduziria a cegueira
+quase na mesma proporção, ao custo de mais tentativas por segundo em cada
+agente cego.
+
+Vale medir antes de mexer: com três ou quatro agentes vivos, a conta de CPU
+muda. E o ganho absoluto — de 90 ms para talvez 50 ms — é pequeno perto do que
+já se conquistou.
+
+---
+
+## Um defeito grave encontrado por acaso
+
+Ao forçar o encerramento do supervisor durante um teste, **o agente continuou
+vivo**. Um deles, criado como SYSTEM, só saiu com privilégio de administrador.
+
+Processo órfão lendo a tela, sem nada que o encerre, é exatamente o que alguém
+teme ao instalar software de acesso remoto — e o nosso fazia isso.
+
+Corrigido com objeto de trabalho do Windows (`KILL_ON_JOB_CLOSE`): quem executa
+a limpeza é o sistema, não o supervisor, então funciona mesmo quando ele morre
+de forma violenta. Verificado matando o supervisor sem aviso — o agente foi
+embora em menos de três segundos.
+
+Vale mais que a otimização que estava sendo perseguida quando apareceu.
+
+---
+
+## Passo 8 — o que vem agora
 
 Com o problema quantificado, o desenho do serviço + agente pode começar:
 
