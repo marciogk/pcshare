@@ -19,6 +19,14 @@
 
 use std::path::PathBuf;
 
+/// Onde cada fatia do tempo foi gasta, em milissegundos.
+struct Fases {
+    perceber: f64,
+    nascer: f64,
+    captura: f64,
+    quadro: f64,
+}
+
 struct Evento {
     us: u128,
     pid: u32,
@@ -76,18 +84,47 @@ pub fn analisar() {
     // do agente seguinte. É o par que define a janela.
     let mut aberto: Option<(&Evento, u128)> = None;
     let mut janelas: Vec<(f64, String, String)> = Vec::new();
+    let mut fases: Vec<Fases> = Vec::new();
+    // Marcos intermediários do episódio em curso.
+    let mut lancou_us: Option<u128> = None;
+    let mut inicio_us: Option<u128> = None;
+    let mut captura_us: Option<u128> = None;
 
     for e in &eventos {
         if let Some(us) = e.tipo.strip_prefix("ultimo-quadro-em ")
             && let Ok(us) = us.trim().parse::<u128>()
         {
             aberto = Some((e, us));
+            lancou_us = None;
+            inicio_us = None;
+            captura_us = None;
+        } else if e.tipo.starts_with("lancou-") {
+            lancou_us = Some(e.us);
+        } else if e.tipo == "inicio" {
+            inicio_us = Some(e.us);
+        } else if e.tipo == "captura-abriu" {
+            captura_us = Some(e.us);
         } else if e.tipo == "primeiro-quadro"
             && let Some((anterior, ultimo_us)) = aberto.take()
             && e.pid != anterior.pid
         {
             let ms = (e.us.saturating_sub(ultimo_us)) as f64 / 1000.0;
             janelas.push((ms, anterior.desktop.clone(), e.desktop.clone()));
+
+            // Sem os marcos do supervisor, a decomposição não fecha; então
+            // preenche-se com zero em vez de inventar.
+            let d = |a: Option<u128>, b: Option<u128>| -> f64 {
+                match (a, b) {
+                    (Some(x), Some(y)) => (y.saturating_sub(x)) as f64 / 1000.0,
+                    _ => 0.0,
+                }
+            };
+            fases.push(Fases {
+                perceber: d(Some(ultimo_us), lancou_us),
+                nascer: d(lancou_us, inicio_us),
+                captura: d(inicio_us, captura_us),
+                quadro: d(captura_us, Some(e.us)),
+            });
         }
     }
 
@@ -98,12 +135,28 @@ pub fn analisar() {
         return;
     }
 
-    println!("{:=<60}", "");
-    println!("JANELAS DE CEGUEIRA");
-    println!("{:=<60}", "");
+    println!("{:=<74}", "");
+    println!("JANELAS DE CEGUEIRA, decompostas");
+    println!("{:=<74}", "");
+    println!(
+        "  {:<22} {:>8} {:>9} {:>9} {:>8} {:>8}",
+        "transição", "total", "perceber", "nascer", "captura", "quadro"
+    );
     for (i, (ms, de, para)) in janelas.iter().enumerate() {
-        println!("  {:>2}. {de} -> {para}: {ms:.1} ms", i + 1);
+        let f = &fases[i];
+        println!(
+            "  {:<22} {ms:>7.0}ms {:>8.0}ms {:>8.0}ms {:>7.0}ms {:>7.0}ms",
+            format!("{de} para {para}"),
+            f.perceber,
+            f.nascer,
+            f.captura,
+            f.quadro
+        );
     }
+    println!("\n  perceber : agente sair, supervisor notar e chamar CreateProcess");
+    println!("  nascer   : CreateProcess retornar até o agente rodar a 1ª instrução");
+    println!("  captura  : abrir o dispositivo D3D11 e a duplicação");
+    println!("  quadro   : da captura aberta até o primeiro quadro entregue");
 
     let mut ordenadas: Vec<f64> = janelas.iter().map(|(ms, _, _)| *ms).collect();
     ordenadas.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));

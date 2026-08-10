@@ -60,35 +60,7 @@ fn log(rotulo: &str, msg: &str) {
 ///
 /// Formato, separado por tabulação:
 /// `microssegundos_desde_epoch  pid  desktop  evento`
-fn agora_us() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_micros())
-        .unwrap_or(0)
-}
-
-fn linha_do_tempo(vinculo: &str, evento: &str) {
-    let linha = format!("{}\t{}\t{vinculo}\t{evento}\n", agora_us(), std::process::id());
-
-    let caminho = caminho_da_linha_do_tempo();
-    if let Some(dir) = caminho.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&caminho)
-    {
-        let _ = f.write_all(linha.as_bytes());
-        let _ = f.flush();
-    }
-}
-
-fn caminho_da_linha_do_tempo() -> PathBuf {
-    PathBuf::from(std::env::var("ProgramData").unwrap_or_else(|_| "C:\\".into()))
-        .join("PCShare")
-        .join("linha-do-tempo.tsv")
-}
+use pcshare_capture::linha_do_tempo::{agora_us, registrar as linha_do_tempo};
 
 fn caminho_do_log(rotulo: &str) -> PathBuf {
     // `ProgramData` porque o agente pode nascer de um serviço SYSTEM, que não
@@ -103,7 +75,17 @@ fn caminho_do_log(rotulo: &str) -> PathBuf {
 }
 
 fn main() {
+    // Primeiríssima instrução: este carimbo mede o custo de criação do
+    // processo, e qualquer coisa antes dele o contamina. A versão anterior o
+    // escrevia depois de quatro gravações em disco, e assim media o log em
+    // vez do nascimento.
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let vinculo_cru = args
+        .iter()
+        .position(|a| a == "--desktop")
+        .and_then(|i| args.get(i + 1).cloned())
+        .unwrap_or_else(|| "desconhecido".into());
+    linha_do_tempo(&vinculo_cru, "inicio");
     let rotulo = args
         .iter()
         .position(|a| a == "--rotulo")
@@ -143,8 +125,6 @@ fn main() {
     // A pergunta que o passo 2 precisa responder: a captura funciona a partir
     // daqui? No desktop do usuário, sim. No Winlogon, só se o agente tiver
     // sido lançado pelo serviço com privilégio de SYSTEM.
-    linha_do_tempo(&vinculo, "inicio");
-
     let mut cap = match DesktopCapture::new(0) {
         Ok(c) => {
             log(&rotulo, &format!("captura ABRIU {}x{}", c.width(), c.height()));

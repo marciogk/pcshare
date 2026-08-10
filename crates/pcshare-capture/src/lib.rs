@@ -6,6 +6,7 @@
 //! e codificar a tela inteira a 30 fps desperdiça banda e CPU.
 
 pub mod desktop;
+pub mod linha_do_tempo;
 
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D11::{

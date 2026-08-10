@@ -26,6 +26,7 @@ use windows::Win32::System::Threading::{
 use windows::core::{PCWSTR, PWSTR};
 
 use pcshare_capture::desktop::{self, InputDesktop};
+use pcshare_capture::linha_do_tempo;
 
 /// Com que frequência se pergunta ao Windows qual é o desktop de entrada.
 ///
@@ -96,6 +97,10 @@ pub fn supervisionar(modo: Modo, parar: &AtomicBool) {
 
         if let Some(motivo) = motivo {
             let percebido = Instant::now();
+            // Sem este carimbo, o intervalo entre a saída do agente e a
+            // percepção do supervisor fica invisível — e foi exatamente ali
+            // que apareceram 565 ms sem explicação na primeira medição.
+            linha_do_tempo::registrar("supervisor", "percebeu");
 
             if let Some(a) = atual.take() {
                 let anterior = a.desktop.clone();
@@ -136,6 +141,13 @@ pub fn supervisionar(modo: Modo, parar: &AtomicBool) {
 
             match lancar(&agente, &desktop_agora, modo) {
                 Ok(a) => {
+                    // Fecha o outro trecho cego: daqui até o agente escrever
+                    // a primeira linha é custo de criação de processo, que
+                    // ninguém estava medindo.
+                    linha_do_tempo::registrar(
+                        "supervisor",
+                        &format!("lancou-{}", nome_do_desktop(&desktop_agora)),
+                    );
                     log(&format!(
                         "agente lançado em '{}' (pid {}) — {:.1} ms desde a percepção",
                         nome_do_desktop(&desktop_agora),
