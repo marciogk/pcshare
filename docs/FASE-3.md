@@ -241,7 +241,41 @@ Depois da correção: 1 agente, 7 linhas de log em 10 segundos.
 
 ---
 
-## Passo 5 — o que vem agora
+## Passo 5 — o ciclo completo, funcionando
+
+Serviço instalado, 06/08/2026. Um prompt de UAC, do início ao fim:
+
+```
+agente lançado em 'Default' (pid 11344) — 9.0 ms
+agente informou troca de desktop: Default para Winlogon
+agente lançado em 'Winlogon' (pid 1892) — 13.4 ms desde a percepção
+agente informou troca de desktop: Winlogon para Default
+agente lançado em 'Default' (pid 14976) — 5.1 ms desde a percepção
+```
+
+Duas trocas, limpas, sem relançamento espúrio. **A arquitetura serviço +
+agente funciona ponta a ponta.**
+
+### O que os 13,4 ms medem — e o que não medem
+
+Medem da **percepção** do supervisor até o lançamento do agente. Não incluem:
+
+- o tempo até o agente **notar** a troca: o laço dele fica até 100 ms dentro
+  de `next_frame` antes de checar o desktop;
+- o tempo até o agente novo abrir a captura e entregar o primeiro quadro.
+
+A cegueira real, portanto, deve ficar em torno de **100 a 200 ms**, dominada
+pelo intervalo de detecção do agente — que é ajustável. Contra os **4 a 5
+segundos** medidos no passo 1, é uma redução de 20 a 40 vezes.
+
+> **Ainda não é a medição definitiva.** O número honesto sai de repetir a
+> medição ponta a ponta do passo 1 com o serviço rodando, não de somar
+> intervalos parciais. Já erramos assim uma vez neste projeto: os "16,8 ms" de
+> latência reportados por dois dias mediam só um trecho do caminho.
+
+---
+
+## Passo 6 — o que vem agora
 
 Com o problema quantificado, o desenho do serviço + agente pode começar:
 

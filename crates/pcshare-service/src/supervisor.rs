@@ -383,13 +383,12 @@ fn wide(s: &str) -> Vec<u16> {
 
 /// Um serviço não tem console: tudo o que importa precisa ir para arquivo.
 pub fn log(msg: &str) {
-    let linha = format!(
-        "[{:>10.3}s] {msg}\n",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs_f64() % 100_000.0)
-            .unwrap_or(0.0)
-    );
+    // Data e hora, e não segundos desde uma origem arbitrária: a versão
+    // anterior usava o relógio do sistema módulo 100.000, e o contador virava
+    // no meio de um teste — uma linha de 99.981s seguida de outra de 10s, sem
+    // explicação para quem lesse o log depois.
+    let agora = std::time::SystemTime::now();
+    let linha = format!("[{}] {msg}\n", formatar_hora(agora));
     print!("{linha}");
     use std::io::Write;
     let _ = std::io::stdout().flush();
@@ -401,6 +400,17 @@ pub fn log(msg: &str) {
     {
         let _ = f.write_all(linha.as_bytes());
     }
+}
+
+/// `HH:MM:SS.mmm` em horário local, sem depender de biblioteca de datas.
+fn formatar_hora(t: std::time::SystemTime) -> String {
+    use windows::Win32::System::SystemInformation::GetLocalTime;
+    let _ = t;
+    let s = unsafe { GetLocalTime() };
+    format!(
+        "{:02}:{:02}:{:02}.{:03}",
+        s.wHour, s.wMinute, s.wSecond, s.wMilliseconds
+    )
 }
 
 pub fn caminho_do_log() -> PathBuf {
