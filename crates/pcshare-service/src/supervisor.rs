@@ -78,6 +78,13 @@ pub fn supervisionar(modo: Modo, parar: &AtomicBool) {
     // usuário, ninguém consegue limpar todos manualmente depois.
     limpar_linha_do_tempo();
 
+    // Se este descritor fechar — inclusive por morte violenta do supervisor —
+    // o Windows encerra todos os agentes junto.
+    let grupo = criar_grupo_de_agentes();
+    if grupo.is_none() {
+        log("AVISO: sem grupo de processos; agentes podem sobreviver ao supervisor");
+    }
+
     let (tx, rx) = std::sync::mpsc::channel::<String>();
     canal::servir(tx);
     log("canal aberto para os agentes");
@@ -146,6 +153,14 @@ pub fn supervisionar(modo: Modo, parar: &AtomicBool) {
 
             match lancar(&agente, &desejado, modo) {
                 Ok(a) => {
+                    if let Some(job) = grupo {
+                        use windows::Win32::System::JobObjects::AssignProcessToJobObject;
+                        unsafe {
+                            if AssignProcessToJobObject(job, a.processo).is_err() {
+                                log("AVISO: agente não entrou no grupo; pode ficar órfão");
+                            }
+                        }
+                    }
                     let _ = linha_do_tempo::registrar("supervisor", &format!("lancou-{alvo}"));
                     log(&format!(
                         "agente lançado em '{alvo}' (pid {}) — {:.1} ms desde a percepção",
@@ -366,6 +381,43 @@ unsafe fn token_system_na_sessao(sessao: u32) -> Result<HANDLE, String> {
         })?;
 
         Ok(copia)
+    }
+}
+
+/// Objeto de trabalho que leva os agentes junto quando o supervisor morre.
+///
+/// Sem isto, matar o supervisor — ou ele travar — deixa os agentes vivos,
+/// **capturando a tela indefinidamente**, sem ninguém para encerrá-los.
+/// Observado: um agente SYSTEM sobreviveu ao supervisor e só saiu com
+/// privilégio de administrador.
+///
+/// Num produto de acesso remoto isso é inaceitável: processo órfão que lê a
+/// tela é exatamente o que um usuário teme ao instalar software do tipo.
+///
+/// `KILL_ON_JOB_CLOSE` faz o Windows encerrar todos os processos do grupo
+/// quando o último descritor dele fecha — o que acontece mesmo se o supervisor
+/// for morto à força, porque quem fecha é o sistema.
+fn criar_grupo_de_agentes() -> Option<HANDLE> {
+    use windows::Win32::System::JobObjects::{
+        CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectExtendedLimitInformation, SetInformationJobObject,
+    };
+    unsafe {
+        let job = CreateJobObjectW(None, PCWSTR::null()).ok()?;
+        let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+        .is_err()
+        {
+            let _ = CloseHandle(job);
+            return None;
+        }
+        Some(job)
     }
 }
 
