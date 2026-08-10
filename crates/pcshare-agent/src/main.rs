@@ -50,6 +50,46 @@ fn log(rotulo: &str, msg: &str) {
     }
 }
 
+/// Linha do tempo compartilhada por **todos** os agentes.
+///
+/// A cegueira que interessa acontece *entre* dois processos: do último quadro
+/// que o agente morrendo entregou até o primeiro que o agente nascendo
+/// entrega. Nenhum dos dois consegue medir isso sozinho — por isso um arquivo
+/// só, com carimbo de relógio de parede, que é o único relógio que dois
+/// processos compartilham.
+///
+/// Formato, separado por tabulação:
+/// `microssegundos_desde_epoch  pid  desktop  evento`
+fn agora_us() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros())
+        .unwrap_or(0)
+}
+
+fn linha_do_tempo(vinculo: &str, evento: &str) {
+    let linha = format!("{}\t{}\t{vinculo}\t{evento}\n", agora_us(), std::process::id());
+
+    let caminho = caminho_da_linha_do_tempo();
+    if let Some(dir) = caminho.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&caminho)
+    {
+        let _ = f.write_all(linha.as_bytes());
+        let _ = f.flush();
+    }
+}
+
+fn caminho_da_linha_do_tempo() -> PathBuf {
+    PathBuf::from(std::env::var("ProgramData").unwrap_or_else(|_| "C:\\".into()))
+        .join("PCShare")
+        .join("linha-do-tempo.tsv")
+}
+
 fn caminho_do_log(rotulo: &str) -> PathBuf {
     // `ProgramData` porque o agente pode nascer de um serviço SYSTEM, que não
     // tem perfil de usuário.
@@ -103,13 +143,17 @@ fn main() {
     // A pergunta que o passo 2 precisa responder: a captura funciona a partir
     // daqui? No desktop do usuário, sim. No Winlogon, só se o agente tiver
     // sido lançado pelo serviço com privilégio de SYSTEM.
+    linha_do_tempo(&vinculo, "inicio");
+
     let mut cap = match DesktopCapture::new(0) {
         Ok(c) => {
             log(&rotulo, &format!("captura ABRIU {}x{}", c.width(), c.height()));
+            linha_do_tempo(&vinculo, "captura-abriu");
             Some(c)
         }
         Err(e) => {
             log(&rotulo, &format!("captura FALHOU: {e}"));
+            linha_do_tempo(&vinculo, "captura-falhou");
             None
         }
     };
@@ -123,6 +167,7 @@ fn main() {
         let ate = Instant::now() + Duration::from_secs(segundos.clamp(1, 3600));
         let mut quadros = 0u32;
         let mut perdas = 0u32;
+        let mut ultimo_quadro_us: Option<u128> = None;
         let mut proximo_relato = Instant::now() + Duration::from_secs(2);
 
         while perpetuo || Instant::now() < ate {
@@ -144,6 +189,13 @@ fn main() {
                         agora.label()
                     ),
                 );
+                // O carimbo do último quadro precisa sair **antes** do
+                // encerramento: é ele que abre a janela de cegueira que o
+                // próximo agente vai fechar.
+                if let Some(us) = ultimo_quadro_us {
+                    linha_do_tempo(&vinculo, &format!("ultimo-quadro-em {us}"));
+                }
+                linha_do_tempo(&vinculo, "fim-por-troca-de-desktop");
                 std::process::exit(desktop::codigo::de(&agora) as i32);
             }
 
@@ -155,7 +207,15 @@ fn main() {
                 proximo_relato += Duration::from_secs(2);
             }
             match cap.next_frame(100) {
-                Ok(Some(_)) => quadros += 1,
+                Ok(Some(_)) => {
+                    quadros += 1;
+                    // Só o primeiro: é ele que fecha a janela de cegueira
+                    // aberta pelo agente anterior.
+                    if quadros == 1 {
+                        linha_do_tempo(&vinculo, "primeiro-quadro");
+                    }
+                    ultimo_quadro_us = Some(agora_us());
+                }
                 Ok(None) => {}
                 Err(_) => {
                     perdas += 1;

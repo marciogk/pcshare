@@ -36,6 +36,7 @@
 //!     Stop-Service  PCShareSupervisor
 //!     pcshare-service.exe desinstalar
 
+mod analise;
 mod servico;
 mod supervisor;
 
@@ -70,6 +71,8 @@ fn main() {
             supervisor::supervisionar(supervisor::Modo::Console, &PARAR);
         }
 
+        Some("analisar") => analise::analisar(),
+
         Some("instalar") => match servico::instalar() {
             Ok(()) => {
                 println!("serviço instalado como 'PCShareSupervisor' (início manual)");
@@ -92,6 +95,7 @@ fn main() {
                 println!("PCShare — supervisor de agentes\n");
                 println!("  experimento    prova o lançamento amarrado a desktop");
                 println!("  supervisor     roda o laço como usuário comum");
+                println!("  analisar       mede a cegueira entre trocas de desktop");
                 println!("  instalar       registra o serviço (requer admin)");
                 println!("  desinstalar    remove o serviço (requer admin)");
                 println!("\n(não fui iniciado como serviço: {e})");
