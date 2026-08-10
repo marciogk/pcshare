@@ -71,7 +71,7 @@ fn main() {
             supervisor::supervisionar(supervisor::Modo::Console, &PARAR);
         }
 
-        Some("analisar") => analise::analisar(),
+        Some("analisar") => analise::analisar(args.get(1).cloned()),
 
         Some("instalar") => match servico::instalar() {
             Ok(()) => {

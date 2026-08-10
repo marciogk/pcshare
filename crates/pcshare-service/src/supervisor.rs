@@ -25,6 +25,7 @@ use windows::Win32::System::Threading::{
 };
 use windows::core::{PCWSTR, PWSTR};
 
+use pcshare_capture::canal;
 use pcshare_capture::desktop::{self, InputDesktop};
 use pcshare_capture::linha_do_tempo;
 
@@ -39,6 +40,12 @@ const VIDA_CURTA: Duration = Duration::from_millis(500);
 /// Teto do recuo. Acima disso a percepção de uma troca legítima ficaria lenta
 /// demais para valer a pena.
 const RECUO_MAXIMO: Duration = Duration::from_secs(3);
+/// Teto de agentes vivos ao mesmo tempo.
+///
+/// Na prática o Windows tem poucos desktops de entrada — `Default`,
+/// `Winlogon`, `Screen-saver`. O limite existe para que um nome inesperado não
+/// faça a coleção crescer sem fim.
+const MAX_AGENTES: usize = 4;
 
 /// Como o agente é lançado.
 #[derive(Clone, Copy, PartialEq)]
@@ -58,127 +65,125 @@ pub fn supervisionar(modo: Modo, parar: &AtomicBool) {
     log(&format!("supervisor iniciado ({} )", rotulo_modo(modo)));
     log(&format!("agente: {}", agente.display()));
 
-    let mut atual: Option<AgenteVivo> = None;
-    let mut trocas = 0u64;
-    let mut mortes_rapidas = 0u32;
+    // Um agente por desktop, **vivos ao mesmo tempo**.
+    //
+    // Matar e recriar a cada troca punha o lançamento no caminho crítico, e a
+    // medição mostrou que criar o agente com token de usuário custa cerca de
+    // 700 ms. Mantendo-os vivos, o agente do desktop que saiu apenas fica cego
+    // e volta sozinho quando o desktop retorna — sem custo de criação.
+    let mut agentes: std::collections::HashMap<String, AgenteVivo> =
+        std::collections::HashMap::new();
+    // Zera a linha do tempo a cada execução. Sem isso, medições de sessões
+    // diferentes se misturam — e como os arquivos nascem de SYSTEM e de
+    // usuário, ninguém consegue limpar todos manualmente depois.
+    limpar_linha_do_tempo();
+
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    canal::servir(tx);
+    log("canal aberto para os agentes");
 
     // O alvo começa no desktop do usuário, que é o caso comum. A partir daí
     // quem manda é o agente: o supervisor **não** consulta o desktop.
     //
     // Não é preguiça, é impossibilidade. Rodando na sessão 0, que tem estação
-    // de janelas própria, `OpenInputDesktop` sempre falha aqui. A versão
+    // de janelas própria, `OpenInputDesktop` sempre falha aqui. Uma versão
     // anterior lia essa falha como "Secure Desktop ativo" e ficou relançando
     // um agente do Winlogon a cada 3 segundos, para sempre, mesmo com o
     // usuário de volta ao desktop normal.
-    let mut alvo = InputDesktop::Default;
+    let mut alvo = "Default".to_string();
+    let mut trocas = 0u64;
+    let mut mortes_rapidas = 0u32;
 
     while !parar.load(Ordering::Relaxed) {
-        // Distinguir os dois motivos importa: relançar porque o desktop mudou
-        // é o funcionamento normal; relançar porque o agente morreu é sintoma
-        // de defeito. Confundir os dois escondeu, por um tempo, um agente que
-        // nascia e morria 10 vezes por segundo.
-        let mut motivo = match &atual {
-            None => Some("primeiro agente"),
-            Some(a) if !a.vivo() => Some("agente encerrou"),
-            Some(_) => None,
-        };
-
-        // O código de saída é o recado: dentro da tabela significa "o desktop
-        // de entrada virou este"; fora dela, o agente simplesmente morreu.
-        if motivo.is_some()
-            && let Some(a) = &atual
-            && let Some(novo) = a.codigo_de_saida().and_then(desktop::codigo::para)
-            && novo != alvo
-        {
-            alvo = novo;
-            motivo = Some("agente informou troca de desktop");
-        }
-        let desktop_agora = alvo.clone();
-
-        if let Some(motivo) = motivo {
-            let percebido = Instant::now();
-            // Sem este carimbo, o intervalo entre a saída do agente e a
-            // percepção do supervisor fica invisível — e foi exatamente ali
-            // que apareceram 565 ms sem explicação na primeira medição.
-            if !linha_do_tempo::registrar("supervisor", "percebeu") {
-                log("AVISO: não foi possível escrever na linha do tempo");
+        // ---- 1. o que os agentes relataram pelo canal
+        while let Ok(msg) = rx.try_recv() {
+            if let Some(d) = canal::desktop_da_mensagem(&msg)
+                && d != alvo
+            {
+                log(&format!("agente relatou: desktop de entrada é '{d}'"));
+                alvo = d.to_string();
+                trocas += 1;
             }
+        }
 
-            if let Some(a) = atual.take() {
-                let anterior = a.desktop.clone();
-                // Morrer logo ao nascer é sintoma de defeito, não de troca de
-                // desktop. Sem recuo, o supervisor vira uma bomba de
-                // processos: observado criando ~20 por segundo e engordando o
-                // log em 1,8 MB em poucos minutos.
-                if !a.vivo() && a.nasceu.elapsed() < VIDA_CURTA {
+        // ---- 2. recolhe os que morreram
+        let mortos: Vec<String> = agentes
+            .iter()
+            .filter(|(_, a)| !a.vivo())
+            .map(|(n, _)| n.clone())
+            .collect();
+        for nome in mortos {
+            if let Some(a) = agentes.remove(&nome) {
+                // Código de saída ainda é aceito: é o caminho de reserva do
+                // agente quando o canal não está disponível.
+                if let Some(novo) = a.codigo_de_saida().and_then(desktop::codigo::para) {
+                    let n = nome_do_desktop(&novo).to_string();
+                    if n != alvo {
+                        log(&format!("agente de '{nome}' encerrou relatando '{n}'"));
+                        alvo = n;
+                        trocas += 1;
+                    }
+                }
+                if a.nasceu.elapsed() < VIDA_CURTA {
                     mortes_rapidas += 1;
                 } else {
                     mortes_rapidas = 0;
                 }
+                log(&format!("agente de '{nome}' encerrou"));
                 a.encerrar();
-                trocas += 1;
-                if mortes_rapidas <= 3 || mortes_rapidas % 20 == 0 {
-                    log(&format!(
-                        "{motivo}: {} para {}{}",
-                        anterior.label(),
-                        desktop_agora.label(),
-                        if mortes_rapidas > 0 {
-                            format!(" (morte rápida #{mortes_rapidas})")
-                        } else {
-                            String::new()
-                        }
-                    ));
-                }
-            } else {
-                log(&format!("{motivo}: {}", desktop_agora.label()));
             }
+        }
 
-            // Recuo exponencial, com teto. Dá tempo de o desktop voltar ao
-            // normal sozinho em vez de insistir num alvo que não aceita
-            // agente nenhum.
+        // ---- 3. garante um agente vivo para o desktop ativo
+        if !agentes.contains_key(&alvo) {
             if mortes_rapidas > 0 {
                 let espera = INTERVALO * (1u32 << mortes_rapidas.min(6));
                 std::thread::sleep(espera.min(RECUO_MAXIMO));
             }
+            let desejado = desktop_por_nome(&alvo);
+            let percebido = Instant::now();
+            let _ = linha_do_tempo::registrar("supervisor", "percebeu");
 
-            match lancar(&agente, &desktop_agora, modo) {
+            match lancar(&agente, &desejado, modo) {
                 Ok(a) => {
-                    // Fecha o outro trecho cego: daqui até o agente escrever
-                    // a primeira linha é custo de criação de processo, que
-                    // ninguém estava medindo.
-                    let _ = linha_do_tempo::registrar(
-                        "supervisor",
-                        &format!("lancou-{}", nome_do_desktop(&desktop_agora)),
-                    );
+                    let _ = linha_do_tempo::registrar("supervisor", &format!("lancou-{alvo}"));
                     log(&format!(
-                        "agente lançado em '{}' (pid {}) — {:.1} ms desde a percepção",
-                        nome_do_desktop(&desktop_agora),
+                        "agente lançado em '{alvo}' (pid {}) — {:.1} ms desde a percepção",
                         a.pid,
                         percebido.elapsed().as_secs_f64() * 1000.0
                     ));
-                    atual = Some(a);
+                    agentes.insert(alvo.clone(), a);
                 }
                 Err(e) => {
-                    // Falhar aqui é esperado no `Winlogon` sem privilégio, e
-                    // não pode derrubar o supervisor: o desktop volta ao
-                    // normal e a próxima tentativa dá certo.
-                    log(&format!(
-                        "não foi possível lançar em '{}': {e}",
-                        nome_do_desktop(&desktop_agora)
-                    ));
+                    log(&format!("não foi possível lançar em '{alvo}': {e}"));
                     std::thread::sleep(INTERVALO);
                 }
             }
         }
 
+        // ---- 4. limita quantos ficam vivos
+        if agentes.len() > MAX_AGENTES
+            && let Some(sacrificado) = agentes
+                .iter()
+                .filter(|(n, _)| *n != &alvo)
+                .min_by_key(|(_, a)| a.nasceu)
+                .map(|(n, _)| n.clone())
+            && let Some(a) = agentes.remove(&sacrificado)
+        {
+            log(&format!("encerrando agente ocioso de '{sacrificado}'"));
+            a.encerrar();
+        }
+
         std::thread::sleep(INTERVALO);
     }
 
-    if let Some(a) = atual.take() {
+    for (nome, a) in agentes.drain() {
+        log(&format!("encerrando agente de '{nome}'"));
         a.encerrar();
     }
     log(&format!("supervisor encerrado ({trocas} trocas de desktop)"));
 }
+
 
 struct AgenteVivo {
     processo: HANDLE,
@@ -361,6 +366,33 @@ unsafe fn token_system_na_sessao(sessao: u32) -> Result<HANDLE, String> {
         })?;
 
         Ok(copia)
+    }
+}
+
+fn limpar_linha_do_tempo() {
+    let pasta = linha_do_tempo::pasta();
+    let Ok(entradas) = std::fs::read_dir(&pasta) else {
+        return;
+    };
+    let mut apagados = 0;
+    for e in entradas.flatten() {
+        if std::fs::remove_file(e.path()).is_ok() {
+            apagados += 1;
+        }
+    }
+    if apagados > 0 {
+        log(&format!("linha do tempo zerada ({apagados} arquivos)"));
+    }
+}
+
+/// Caminho inverso de [`nome_do_desktop`], para reconstruir o alvo a partir do
+/// que o agente relatou pelo canal.
+fn desktop_por_nome(nome: &str) -> InputDesktop {
+    match nome {
+        "Default" => InputDesktop::Default,
+        "Winlogon" => InputDesktop::Winlogon,
+        "Screen-saver" => InputDesktop::ScreenSaver,
+        outro => InputDesktop::Other(outro.to_string()),
     }
 }
 

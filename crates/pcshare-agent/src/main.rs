@@ -60,7 +60,20 @@ fn log(rotulo: &str, msg: &str) {
 ///
 /// Formato, separado por tabulação:
 /// `microssegundos_desde_epoch  pid  desktop  evento`
+use pcshare_capture::canal;
+use pcshare_capture::desktop::InputDesktop;
 use pcshare_capture::linha_do_tempo::{agora_us, registrar as linha_do_tempo};
+
+/// Nome que o Windows usa, para relatar ao supervisor.
+fn nome_do_desktop(d: &InputDesktop) -> &str {
+    match d {
+        InputDesktop::Default => "Default",
+        // `Denied` é o que se vê quando o Secure Desktop está à frente.
+        InputDesktop::Winlogon | InputDesktop::Denied => "Winlogon",
+        InputDesktop::ScreenSaver => "Screen-saver",
+        InputDesktop::Other(n) => n,
+    }
+}
 
 fn caminho_do_log(rotulo: &str) -> PathBuf {
     // `ProgramData` porque o agente pode nascer de um serviço SYSTEM, que não
@@ -158,6 +171,8 @@ fn main() {
         let mut quadros = 0u32;
         let mut perdas = 0u32;
         let mut ultimo_quadro_us: Option<u128> = None;
+        let mut capturando = false;
+        let mut ultimo_relatado = codigo_do_vinculo;
         let mut proximo_relato = Instant::now() + Duration::from_secs(2);
 
         while perpetuo || Instant::now() < ate {
@@ -169,24 +184,32 @@ fn main() {
             // sempre, porque ninguém o encerrou. Quem percebe a troca é ele
             // — o supervisor, na sessão 0, não enxerga desktop nenhum. Então
             // é ele quem avisa, encerrando com o código do desktop novo.
+            // Relata a troca **sem morrer**.
+            //
+            // Antes o agente encerrava e o supervisor criava outro no caminho
+            // crítico. Medido: recriar com token de usuário custa cerca de
+            // 700 ms — 90% da cegueira ao voltar do UAC. Vivo, ele fica cego
+            // por alguns segundos e volta sozinho quando o desktop retorna.
             let agora = desktop::input_desktop();
-            if perpetuo && desktop::codigo::de(&agora) != codigo_do_vinculo {
-                log(
-                    &rotulo,
-                    &format!(
-                        "desktop de entrada virou '{}' — encerrando para o supervisor \
-                         lançar outro ({quadros} quadros, {perdas} perdas)",
-                        agora.label()
-                    ),
-                );
-                // O carimbo do último quadro precisa sair **antes** do
-                // encerramento: é ele que abre a janela de cegueira que o
-                // próximo agente vai fechar.
-                if let Some(us) = ultimo_quadro_us {
-                    let _ = linha_do_tempo(&vinculo, &format!("ultimo-quadro-em {us}"));
+            let codigo_agora = desktop::codigo::de(&agora);
+            if perpetuo && codigo_agora != ultimo_relatado {
+                ultimo_relatado = codigo_agora;
+                let nome = nome_do_desktop(&agora);
+                if canal::enviar(&canal::mensagem_de_desktop(nome)) {
+                    log(&rotulo, &format!("relatei ao supervisor: desktop '{nome}'"));
+                } else {
+                    // Sem canal, volta ao comportamento antigo: encerrar com o
+                    // destino no código de saída. Mais lento, mas o supervisor
+                    // continua sabendo para onde ir.
+                    log(
+                        &rotulo,
+                        "canal indisponível — encerrando para relatar pelo código de saída",
+                    );
+                    if let Some(us) = ultimo_quadro_us {
+                        let _ = linha_do_tempo(&vinculo, &format!("cego-desde {us}"));
+                    }
+                    std::process::exit(codigo_agora as i32);
                 }
-                let _ = linha_do_tempo(&vinculo, "fim-por-troca-de-desktop");
-                std::process::exit(desktop::codigo::de(&agora) as i32);
             }
 
             if perpetuo && Instant::now() >= proximo_relato {
@@ -199,16 +222,28 @@ fn main() {
             match cap.next_frame(100) {
                 Ok(Some(_)) => {
                     quadros += 1;
-                    // Só o primeiro: é ele que fecha a janela de cegueira
-                    // aberta pelo agente anterior.
-                    if quadros == 1 {
-                        let _ = linha_do_tempo(&vinculo, "primeiro-quadro");
-                    }
                     ultimo_quadro_us = Some(agora_us());
+                    // Marca a **transição** para capturando, não o primeiro
+                    // quadro da vida do processo: com agentes persistentes,
+                    // quem fecha a janela de cegueira costuma ser um agente
+                    // que retoma, não um que nasce.
+                    if !capturando {
+                        capturando = true;
+                        let _ = linha_do_tempo(&vinculo, "capturando");
+                    }
                 }
                 Ok(None) => {}
                 Err(_) => {
                     perdas += 1;
+                    if capturando {
+                        capturando = false;
+                        // Abre a janela de cegueira no instante do último
+                        // quadro entregue, que é quando a tela remota
+                        // congelou de fato.
+                        if let Some(us) = ultimo_quadro_us {
+                            let _ = linha_do_tempo(&vinculo, &format!("cego-desde {us}"));
+                        }
+                    }
                     let _ = cap.recover();
                     std::thread::sleep(Duration::from_millis(50));
                 }
