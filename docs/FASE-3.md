@@ -275,7 +275,52 @@ segundos** medidos no passo 1, é uma redução de 20 a 40 vezes.
 
 ---
 
-## Passo 6 — o que vem agora
+## Passo 6 — a cegueira real, medida e decomposta
+
+Medido em 06/08/2026, oito transições, serviço instalado.
+
+| Transição | total | perceber | **nascer** | captura | quadro |
+|---|---|---|---|---|---|
+| Default → Winlogon | ~210 ms | 37–76 ms | **106–130 ms** | 35–38 ms | 1 ms |
+| Winlogon → Default | ~770 ms | 11–56 ms | **663–747 ms** | 37–43 ms | 1 ms |
+
+Contra os **3950 a 5347 ms** sem serviço, é redução de 6 a 25 vezes conforme o
+sentido. A Fase 3 cumpre o que prometia.
+
+### Onde está o tempo
+
+`nascer` é o intervalo entre o `CreateProcess` retornar e o agente executar a
+primeira instrução. Criar o agente com o **token do usuário** custa cerca de
+700 ms; com o **token de SYSTEM**, cerca de 120 ms. Diferença de quase 600 ms,
+consistente nas oito transições.
+
+Não é o Secure Desktop que é lento — ele é justamente o lado rápido. É o
+caminho do token de usuário, obtido por `WTSQueryUserToken`.
+
+As outras fases são pequenas e simétricas: perceber fica em dezenas de
+milissegundos, abrir a captura em torno de 40 ms, e o primeiro quadro chega em
+1 ms.
+
+### O caminho óbvio, e por que não é tão óbvio
+
+Usar o token de SYSTEM para os dois desktops derrubaria a cegueira para ~200 ms
+nos dois sentidos. Mas é **rebaixamento de segurança**: o agente do desktop do
+usuário passaria a rodar com mais privilégio do que precisa, e isso pesa mais
+adiante — injeção de entrada, área de transferência e transferência de
+arquivos devem acontecer com as permissões de quem está logado, não com as de
+SYSTEM.
+
+A saída melhor é não pagar o custo: **manter os agentes vivos** em vez de
+matá-los a cada troca. O agente do `Default` não precisa morrer quando o UAC
+aparece; ele fica cego por alguns segundos e volta sozinho. Assim o
+relançamento — que é a fase cara — deixa de acontecer no caminho crítico.
+
+Isso exige que o agente relate a troca **sem encerrar**, o que hoje ele faz
+pelo código de saída. É a próxima decisão de projeto.
+
+---
+
+## Passo 7 — o que vem agora
 
 Com o problema quantificado, o desenho do serviço + agente pode começar:
 
