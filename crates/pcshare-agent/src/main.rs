@@ -85,7 +85,7 @@ fn main() {
         .position(|a| a == "--desktop")
         .and_then(|i| args.get(i + 1).cloned())
         .unwrap_or_else(|| "desconhecido".into());
-    linha_do_tempo(&vinculo_cru, "inicio");
+    let instrumento_ok = linha_do_tempo(&vinculo_cru, "inicio");
     let rotulo = args
         .iter()
         .position(|a| a == "--rotulo")
@@ -115,6 +115,14 @@ fn main() {
     let (sessao, console) = desktop::sessions();
 
     log(&rotulo, "=== início ===");
+    if !instrumento_ok {
+        // Sem este aviso, o agente some da medição sem deixar rastro — e o
+        // analisador passa a casar eventos de agentes errados.
+        log(
+            &rotulo,
+            "AVISO: não consegui escrever na linha do tempo; a medição ficará incompleta",
+        );
+    }
     log(&rotulo, &format!("pid {}", std::process::id()));
     log(&rotulo, &format!("sessão {sessao} (console: {console})"));
     log(
@@ -128,12 +136,14 @@ fn main() {
     let mut cap = match DesktopCapture::new(0) {
         Ok(c) => {
             log(&rotulo, &format!("captura ABRIU {}x{}", c.width(), c.height()));
-            linha_do_tempo(&vinculo, "captura-abriu");
+            // Se o primeiro registro passou, os seguintes passam: mesmo
+            // arquivo, mesmo dono.
+            let _ = linha_do_tempo(&vinculo, "captura-abriu");
             Some(c)
         }
         Err(e) => {
             log(&rotulo, &format!("captura FALHOU: {e}"));
-            linha_do_tempo(&vinculo, "captura-falhou");
+            let _ = linha_do_tempo(&vinculo, "captura-falhou");
             None
         }
     };
@@ -173,9 +183,9 @@ fn main() {
                 // encerramento: é ele que abre a janela de cegueira que o
                 // próximo agente vai fechar.
                 if let Some(us) = ultimo_quadro_us {
-                    linha_do_tempo(&vinculo, &format!("ultimo-quadro-em {us}"));
+                    let _ = linha_do_tempo(&vinculo, &format!("ultimo-quadro-em {us}"));
                 }
-                linha_do_tempo(&vinculo, "fim-por-troca-de-desktop");
+                let _ = linha_do_tempo(&vinculo, "fim-por-troca-de-desktop");
                 std::process::exit(desktop::codigo::de(&agora) as i32);
             }
 
@@ -192,7 +202,7 @@ fn main() {
                     // Só o primeiro: é ele que fecha a janela de cegueira
                     // aberta pelo agente anterior.
                     if quadros == 1 {
-                        linha_do_tempo(&vinculo, "primeiro-quadro");
+                        let _ = linha_do_tempo(&vinculo, "primeiro-quadro");
                     }
                     ultimo_quadro_us = Some(agora_us());
                 }

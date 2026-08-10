@@ -17,7 +17,6 @@
 //! troca e o tempo até o novo abrir a captura. Somar pedaços foi exatamente o
 //! que manteve os "16,8 ms" de latência vivos por dois dias neste projeto.
 
-use std::path::PathBuf;
 
 /// Onde cada fatia do tempo foi gasta, em milissegundos.
 struct Fases {
@@ -35,12 +34,29 @@ struct Evento {
 }
 
 pub fn analisar() {
-    let caminho = caminho_da_linha_do_tempo();
-    let Ok(texto) = std::fs::read_to_string(&caminho) else {
-        eprintln!("linha do tempo não encontrada em {}", caminho.display());
+    let pasta = pcshare_capture::linha_do_tempo::pasta();
+    let Ok(entradas) = std::fs::read_dir(&pasta) else {
+        eprintln!("linha do tempo não encontrada em {}", pasta.display());
         eprintln!("rode o serviço e provoque ao menos uma troca de desktop.");
         return;
     };
+
+    // Um arquivo por processo, para que cada um seja dono do seu e não haja
+    // disputa de permissão entre SYSTEM e usuário.
+    let mut texto = String::new();
+    let mut arquivos = 0usize;
+    for e in entradas.flatten() {
+        if e.path().extension().is_some_and(|x| x == "tsv")
+            && let Ok(t) = std::fs::read_to_string(e.path())
+        {
+            texto.push_str(&t);
+            arquivos += 1;
+        }
+    }
+    if arquivos == 0 {
+        eprintln!("nenhum arquivo de linha do tempo em {}", pasta.display());
+        return;
+    }
 
     // Descartar linha em silêncio é armadilha: uma marca de ordem de byte no
     // começo do arquivo já engoliu um evento num teste, e nada avisou.
@@ -73,7 +89,7 @@ pub fn analisar() {
     }
 
     println!("PCShare — cegueira medida entre agentes\n");
-    println!("origem: {}", caminho.display());
+    println!("origem: {} ({arquivos} processos)", pasta.display());
     println!("{} eventos", eventos.len());
     if ignoradas > 0 {
         println!("{ignoradas} linha(s) ilegível(is) — a medição pode estar incompleta");
@@ -128,6 +144,39 @@ pub fn analisar() {
         }
     }
 
+    // Verificação de sanidade do próprio instrumento, antes de qualquer
+    // número: todo lançamento tem de ser seguido pelo nascimento de um agente.
+    // Quando não é, o agente existiu mas não conseguiu registrar — e casar os
+    // eventos restantes produziria pares entre agentes que nunca se
+    // sucederam. Foi assim que apareceram 10 segundos de cegueira inexistente.
+    let mut lancamentos_mudos = Vec::new();
+    for (i, e) in eventos.iter().enumerate() {
+        if e.tipo.starts_with("lancou-") {
+            let houve_inicio = eventos[i + 1..]
+                .iter()
+                .take_while(|p| !p.tipo.starts_with("lancou-"))
+                .any(|p| p.tipo == "inicio");
+            if !houve_inicio {
+                lancamentos_mudos.push(e.tipo.trim_start_matches("lancou-").to_string());
+            }
+        }
+    }
+    if !lancamentos_mudos.is_empty() {
+        println!("{:=<74}", "");
+        println!("MEDIÇÃO INVÁLIDA");
+        println!("{:=<74}", "");
+        println!(
+            "  {} lançamento(s) não produziram evento algum: {}",
+            lancamentos_mudos.len(),
+            lancamentos_mudos.join(", ")
+        );
+        println!("\n  Esses agentes rodaram — o log do supervisor comprova — mas não");
+        println!("  conseguiram escrever na linha do tempo. Casar os eventos que");
+        println!("  sobraram produziria pares entre agentes que nunca se sucederam.");
+        println!("\n  Verifique permissões de escrita em {}", pasta.display());
+        return;
+    }
+
     if janelas.is_empty() {
         println!("Nenhuma janela de cegueira completa foi encontrada.");
         println!("É preciso uma troca de desktop com quadros dos dois lados —");
@@ -179,8 +228,3 @@ pub fn analisar() {
     println!("  o primeiro quadro.");
 }
 
-fn caminho_da_linha_do_tempo() -> PathBuf {
-    PathBuf::from(std::env::var("ProgramData").unwrap_or_else(|_| "C:\\".into()))
-        .join("PCShare")
-        .join("linha-do-tempo.tsv")
-}

@@ -100,7 +100,9 @@ pub fn supervisionar(modo: Modo, parar: &AtomicBool) {
             // Sem este carimbo, o intervalo entre a saída do agente e a
             // percepção do supervisor fica invisível — e foi exatamente ali
             // que apareceram 565 ms sem explicação na primeira medição.
-            linha_do_tempo::registrar("supervisor", "percebeu");
+            if !linha_do_tempo::registrar("supervisor", "percebeu") {
+                log("AVISO: não foi possível escrever na linha do tempo");
+            }
 
             if let Some(a) = atual.take() {
                 let anterior = a.desktop.clone();
@@ -144,7 +146,7 @@ pub fn supervisionar(modo: Modo, parar: &AtomicBool) {
                     // Fecha o outro trecho cego: daqui até o agente escrever
                     // a primeira linha é custo de criação de processo, que
                     // ninguém estava medindo.
-                    linha_do_tempo::registrar(
+                    let _ = linha_do_tempo::registrar(
                         "supervisor",
                         &format!("lancou-{}", nome_do_desktop(&desktop_agora)),
                     );

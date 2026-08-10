@@ -20,31 +20,45 @@ pub fn agora_us() -> u128 {
         .unwrap_or(0)
 }
 
-pub fn registrar(contexto: &str, evento: &str) {
+/// `false` quando não foi possível registrar — e isso **precisa** ser tratado.
+///
+/// A versão anterior engolia a falha. Um arquivo único, criado pelo supervisor
+/// como SYSTEM, herdava permissão de leitura apenas para o grupo Usuários: os
+/// agentes que rodam como usuário não conseguiam escrever, e sumiam da
+/// medição em silêncio. O analisador então casava eventos de agentes errados e
+/// produzia números com cara de dado — 10 segundos de "cegueira" que nunca
+/// existiram.
+#[must_use]
+pub fn registrar(contexto: &str, evento: &str) -> bool {
     let linha = format!(
         "{}\t{}\t{contexto}\t{evento}\n",
         agora_us(),
         std::process::id()
     );
 
-    let caminho = caminho();
-    if let Some(dir) = caminho.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    let pasta = pasta();
+    if std::fs::create_dir_all(&pasta).is_err() {
+        return false;
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new()
+
+    // Um arquivo por processo: cada um é dono do seu, e não há disputa de
+    // permissão entre SYSTEM e usuário. O analisador junta tudo depois.
+    let caminho = pasta.join(format!("{}.tsv", std::process::id()));
+    match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&caminho)
     {
-        let _ = f.write_all(linha.as_bytes());
-        let _ = f.flush();
+        Ok(mut f) => f.write_all(linha.as_bytes()).and_then(|_| f.flush()).is_ok(),
+        Err(_) => false,
     }
 }
 
-pub fn caminho() -> PathBuf {
+/// Pasta com um arquivo por processo participante.
+pub fn pasta() -> PathBuf {
     // `ProgramData` porque o supervisor roda como SYSTEM, sem perfil de
-    // usuário — e agente e supervisor precisam escrever no mesmo arquivo.
+    // usuário, e os dois precisam escrever no mesmo lugar.
     PathBuf::from(std::env::var("ProgramData").unwrap_or_else(|_| "C:\\".into()))
         .join("PCShare")
-        .join("linha-do-tempo.tsv")
+        .join("linha-do-tempo")
 }
