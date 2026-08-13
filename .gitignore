@@ -12,3 +12,6 @@
 
 # Binário montado para copiar até a outra máquina no teste da etapa 5
 /pacote-notebook
+
+# Permissões locais do Claude Code, não do produto
+/.claude
