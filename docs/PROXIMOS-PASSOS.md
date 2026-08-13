@@ -1,10 +1,64 @@
 # Próximos passos
 
-Atualizado em 10/08/2026, ao encerrar.
+Atualizado em 13/08/2026, ao encerrar.
 
 ---
 
-## Onde paramos
+## Onde paramos (13/08/2026)
+
+**A pipeline foi migrada para o agente.** A arquitetura passou a ser a que a
+decisão D5 previa:
+
+| Processo | O que faz | Por quê |
+|---|---|---|
+| **agente** | captura, converte na GPU, codifica, injeta entrada | só ele está preso ao desktop |
+| **supervisor** | QUIC, Noise, repasse, contrapressão | só ele sobrevive à troca de desktop |
+
+O canal entre os dois virou **bidirecional e persistente**: vídeo sobe, entrada
+desce. 38 testes passando em release, contra 35 antes.
+
+### O que ainda não foi feito: medir
+
+Nada disto foi exercitado de ponta a ponta. **O código compila e os testes
+unitários passam, mas nenhum quadro atravessou a arquitetura nova ainda.** A
+medição é o próximo passo, e está descrita abaixo.
+
+### Três defeitos encontrados durante a migração
+
+Vale registrar, porque nenhum dos três estava previsto no plano:
+
+1. **Descritor síncrono trava canal duplex.** O Windows serializa toda a E/S
+   sobre um descritor síncrono, mesmo em direções opostas: a thread leitora
+   parada em `ReadFile` bloqueava a escrita que traria os dados. Deadlock com
+   0% de CPU. A saída foi `FILE_FLAG_OVERLAPPED` nas duas pontas.
+
+2. **Invólucro `Send` contornado pela captura precisa de closures.** Havia um
+   `struct Cano(HANDLE)` com `unsafe impl Send`, e o fechamento fazia
+   `cano.0` — o que faz o Rust capturar o **campo**, não a struct, levando o
+   `HANDLE` cru para a outra thread sem passar pelo `Send` do invólucro. O
+   descritor agora atravessa como `usize`, que é `Send` de verdade.
+
+3. **Agente congela sem viewer.** O agente empurrava vídeo mesmo sem ninguém
+   assistindo; o cano enche em torno de meio segundo e a escrita seguinte
+   bloqueia para sempre. Junto com o agente parariam os relatos de troca de
+   desktop — a Fase 3 inteira. Resolvido com `Mensagem::Capturar`, que o
+   supervisor liga quando um viewer chega.
+
+### A permissão do cano foi estreitada — e não bastava
+
+O plano previa restringir o cano ao usuário do console mais SYSTEM. Ao
+escrever, ficou claro que **isso não fecha a brecha que o próprio plano
+descreve**: o agente do desktop do usuário roda com o token do usuário, logo o
+usuário precisa ter acesso ao cano — e passaria a poder ler os quadros do
+`Winlogon`, que ele não consegue capturar sozinho.
+
+Quem fecha é a verificação de PID: o supervisor só conversa com processos que
+ele mesmo lançou. Para não haver corrida, o agente **nasce suspenso**, entra na
+lista de autorizados, e só então é liberado.
+
+---
+
+## Estado anterior (10/08/2026)
 
 **A Fase 3 está resolvida no essencial.** A arquitetura serviço + agente
 funciona, e a cegueira durante um prompt de UAC caiu de **4600 ms para 91 ms**
@@ -42,18 +96,44 @@ cd "c:\Projeto Pcshare"
 
 ## O que vem a seguir
 
-### 1. Migrar a pipeline para o agente 🔴 o maior em volume
+### 1. Medir a arquitetura nova 🔴 é o próximo passo
 
-O agente hoje só prova que captura. Falta mover para dentro dele o que já
-existe e funciona em `pcshare-spike`: encode, transporte e injeção de entrada.
+Nada da migração foi exercitado ainda. Três coisas, em ordem:
 
-**Decisão de projeto que precisa vir antes:** a sessão de rede — QUIC,
-handshake Noise, ID e senha — tem de viver no **supervisor**, não no agente.
-Toda troca de desktop mata e recria agentes; se a sessão morar neles, cada
-prompt de UAC derrubaria o viewer, desfazendo tudo o que a Fase 3 conquistou.
+**a) Uma imagem qualquer, em modo console.** Num PowerShell **como
+administrador**:
 
-Isso implica passar quadros do agente para o supervisor — memória
-compartilhada ou o canal por named pipe que já existe.
+```powershell
+cd "c:\Projeto Pcshare"
+$env:PCSHARE_SENHA = "482913"
+.\target\release\pcshare-service.exe supervisor
+```
+
+O log (`%ProgramData%\PCShare\supervisor.log`) deve mostrar o ID da máquina, a
+porta, e `N agentes transmitindo` quando o viewer conectar. No notebook:
+
+```powershell
+.\pcshare.exe viewer 192.168.15.3:7000 --password 482913 --view-only
+```
+
+> Confirme o IP antes — pode ter mudado por DHCP:
+> `(Get-NetIPAddress -AddressFamily IPv4 | Where-Object InterfaceAlias -eq 'Ethernet').IPAddress`
+
+**b) O teste que justifica a arquitetura inteira.** Com o serviço instalado e o
+viewer conectado, provocar um prompt de UAC. O esperado: a imagem congela por
+volta de 90 ms e volta, **e a sessão não cai**. Se cair, a migração desfez a
+Fase 3 e é ali que está o problema.
+
+**c) Latência e banda,** contra os números do `pcshare-spike`: **53,6 ms**
+tela→exibição e **0,5–0,9 Mbps**. O canal acrescentou uma travessia de
+processo; se a latência subir muito, é ali.
+
+> **Atenção ao instrumento.** A medição de latência do spike só valia com host
+> e viewer no mesmo processo, porque comparava dois `Instant` da mesma origem.
+> Agora são três processos. O agente carimba em relógio de parede, mas o viewer
+> ainda subtrai do relógio dele — **medir sem arrumar isso dá número errado, e
+> errado para baixo**, que é o pior caso. Três medições deste projeto já saíram
+> plausíveis e falsas.
 
 ### 2. Tela de bloqueio e Ctrl+Alt+Del 🟢
 

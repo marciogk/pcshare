@@ -11,6 +11,16 @@
 //!    que o host também seja elevado.
 //!
 //! A arquitetura serviço + agente da decisão D5 existe para resolver as duas.
+//!
+//! # Por que é um crate, e não um módulo
+//!
+//! Dois processos precisam disto: o `pcshare-spike`, que continua sendo a
+//! referência de processo único que funciona, e o `pcshare-agent`, que é para
+//! onde a pipeline está migrando. Enquanto os dois existirem, duplicar o
+//! arquivo seria pedir para eles divergirem em silêncio.
+//!
+//! Não entrou no `pcshare-capture` de propósito: injetar entrada é o oposto de
+//! capturar, e o nome do crate seria uma mentira que alguém pagaria depois.
 
 use pcshare_core::{InputEvent, MouseButton};
 use windows::Win32::UI::Input::KeyboardAndMouse::{

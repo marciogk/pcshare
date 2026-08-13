@@ -733,6 +733,10 @@ name = "pcshare-agent"
 version = "0.0.1"
 dependencies = [
  "pcshare-capture",
+ "pcshare-codec",
+ "pcshare-core",
+ "pcshare-gpu",
+ "pcshare-input",
 ]
 
 [[package]]
@@ -773,10 +777,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pcshare-input"
+version = "0.0.1"
+dependencies = [
+ "pcshare-core",
+ "windows",
+]
+
+[[package]]
 name = "pcshare-service"
 version = "0.0.1"
 dependencies = [
  "pcshare-capture",
+ "pcshare-core",
  "windows",
 ]
 
@@ -788,6 +801,7 @@ dependencies = [
  "pcshare-codec",
  "pcshare-core",
  "pcshare-gpu",
+ "pcshare-input",
  "windows",
 ]
 

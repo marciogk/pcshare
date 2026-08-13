@@ -38,6 +38,7 @@
 
 mod analise;
 mod servico;
+mod sessao;
 mod supervisor;
 
 use std::sync::atomic::AtomicBool;

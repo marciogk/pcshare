@@ -20,8 +20,9 @@ use windows::Win32::Security::{
 };
 use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
 use windows::Win32::System::Threading::{
-    CREATE_NEW_CONSOLE, CREATE_NO_WINDOW, CreateProcessAsUserW, CreateProcessW, GetCurrentProcess,
-    OpenProcessToken, PROCESS_INFORMATION, STARTUPINFOW, TerminateProcess,
+    CREATE_NEW_CONSOLE, CREATE_NO_WINDOW, CREATE_SUSPENDED, CreateProcessAsUserW, CreateProcessW,
+    GetCurrentProcess, OpenProcessToken, PROCESS_INFORMATION, ResumeThread, STARTUPINFOW,
+    TerminateProcess,
 };
 use windows::core::{PCWSTR, PWSTR};
 
@@ -86,8 +87,18 @@ pub fn supervisionar(modo: Modo, parar: &AtomicBool) {
     }
 
     let (tx, rx) = std::sync::mpsc::channel::<String>();
-    canal::servir(tx);
+    // Só os processos que este supervisor lançar falam pelo cano. Ver
+    // `canal::Autorizados`: sem isto, qualquer programa do usuário poderia ler
+    // os quadros do `Winlogon`.
+    let autorizados = canal::Autorizados::default();
+    let servidor = canal::Servidor::abrir(canal::CANO_PADRAO, autorizados.clone());
     log("canal aberto para os agentes");
+
+    // A sessão de rede leva o `Servidor` embora: a partir daqui é ela que fala
+    // com os agentes, e o que o supervisor ainda precisa saber — trocas de
+    // desktop — volta por `rx`.
+    crate::sessao::iniciar(servidor, tx, endereco_de_escuta(), senha_da_sessao());
+
 
     // O alvo começa no desktop do usuário, que é o caso comum. A partir daí
     // quem manda é o agente: o supervisor **não** consulta o desktop.
@@ -103,12 +114,10 @@ pub fn supervisionar(modo: Modo, parar: &AtomicBool) {
 
     while !parar.load(Ordering::Relaxed) {
         // ---- 1. o que os agentes relataram pelo canal
-        while let Ok(msg) = rx.try_recv() {
-            if let Some(d) = canal::desktop_da_mensagem(&msg)
-                && d != alvo
-            {
-                log(&format!("agente relatou: desktop de entrada é '{d}'"));
-                alvo = d.to_string();
+        while let Ok(nome) = rx.try_recv() {
+            if nome != alvo {
+                log(&format!("agente relatou: desktop de entrada é '{nome}'"));
+                alvo = nome;
                 trocas += 1;
             }
         }
@@ -137,6 +146,9 @@ pub fn supervisionar(modo: Modo, parar: &AtomicBool) {
                     mortes_rapidas = 0;
                 }
                 log(&format!("agente de '{nome}' encerrou"));
+                // O Windows reaproveita PIDs; deixar o número autorizado abriria
+                // a porta para um processo qualquer que herdasse esse PID.
+                autorizados.revogar(a.pid);
                 a.encerrar();
             }
         }
@@ -161,6 +173,10 @@ pub fn supervisionar(modo: Modo, parar: &AtomicBool) {
                             }
                         }
                     }
+                    // Autorizar e só então soltar: o agente ainda não executou
+                    // nenhuma instrução, então não há corrida com a conexão.
+                    autorizados.permitir(a.pid);
+                    a.liberar();
                     let _ = linha_do_tempo::registrar("supervisor", &format!("lancou-{alvo}"));
                     log(&format!(
                         "agente lançado em '{alvo}' (pid {}) — {:.1} ms desde a percepção",
@@ -186,6 +202,7 @@ pub fn supervisionar(modo: Modo, parar: &AtomicBool) {
             && let Some(a) = agentes.remove(&sacrificado)
         {
             log(&format!("encerrando agente ocioso de '{sacrificado}'"));
+            autorizados.revogar(a.pid);
             a.encerrar();
         }
 
@@ -231,6 +248,20 @@ impl AgenteVivo {
         self.codigo_bruto()
     }
 
+    /// Solta o agente, que nasce suspenso.
+    ///
+    /// Nascer suspenso não é detalhe: o PID precisa entrar na lista de
+    /// autorizados **antes** da primeira instrução do agente, ou ele conecta
+    /// no cano e é recusado por uma corrida que só apareceria de vez em quando.
+    fn liberar(&self) {
+        unsafe {
+            // -1 significa falha; qualquer outro valor é a contagem anterior.
+            if ResumeThread(self.thread) == u32::MAX {
+                log(&format!("AVISO: agente {} não saiu da suspensão", self.pid));
+            }
+        }
+    }
+
     fn encerrar(self) {
         unsafe {
             let _ = TerminateProcess(self.processo, 0);
@@ -270,7 +301,7 @@ fn lancar(exe: &Path, desktop: &InputDesktop, modo: Modo) -> Result<AgenteVivo, 
                 None,
                 None,
                 false,
-                CREATE_NO_WINDOW,
+                CREATE_NO_WINDOW | CREATE_SUSPENDED,
                 None,
                 PCWSTR::null(),
                 &si,
@@ -311,7 +342,7 @@ fn lancar(exe: &Path, desktop: &InputDesktop, modo: Modo) -> Result<AgenteVivo, 
                     None,
                     None,
                     false,
-                    CREATE_NEW_CONSOLE,
+                    CREATE_NEW_CONSOLE | CREATE_SUSPENDED,
                     None,
                     PCWSTR::null(),
                     &si,
@@ -460,6 +491,27 @@ fn nome_do_desktop(d: &InputDesktop) -> &str {
         InputDesktop::ScreenSaver => "Screen-saver",
         InputDesktop::Other(n) => n,
     }
+}
+
+/// Onde a sessão escuta. Um serviço não tem linha de comando útil depois de
+/// instalado, então a configuração vem do ambiente.
+fn endereco_de_escuta() -> std::net::SocketAddr {
+    const PADRAO: &str = "0.0.0.0:7000";
+    let bruto = std::env::var("PCSHARE_BIND").unwrap_or_else(|_| PADRAO.into());
+    bruto.parse().unwrap_or_else(|_| {
+        log(&format!("PCSHARE_BIND inválido ('{bruto}'); usando {PADRAO}"));
+        PADRAO.parse().expect("endereço padrão é válido")
+    })
+}
+
+/// Senha da sessão.
+///
+/// Sorteada quando não vem do ambiente, e registrada no log — que é o único
+/// lugar onde alguém pode lê-la num serviço sem interface. Isto é arranjo de
+/// desenvolvimento, não de produto: um serviço de verdade sorteia a cada
+/// atendimento e mostra a senha na tela da máquina que está sendo assistida.
+fn senha_da_sessao() -> String {
+    std::env::var("PCSHARE_SENHA").unwrap_or_else(|_| pcshare_core::secure::random_password())
 }
 
 fn rotulo_modo(m: Modo) -> &'static str {

@@ -12,7 +12,7 @@
 //! que o monitor leva para acendê-lo. O protocolo com cronômetro e câmera, em
 //! `docs/SPRINT-0.md`, continua sendo a medida que vale.
 
-mod input;
+use pcshare_input as input;
 mod window;
 
 use std::collections::VecDeque;

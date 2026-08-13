@@ -7,4 +7,5 @@ publish.workspace = true
 
 [dependencies]
 pcshare-capture = { version = "0.0.1", path = "../pcshare-capture" }
+pcshare-core = { version = "0.0.1", path = "../pcshare-core" }
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_StationsAndDesktops", "Win32_System_Threading", "Win32_System_RemoteDesktop", "Win32_Security", "Win32_System_Services", "Win32_System_Console", "Win32_System_SystemInformation", "Win32_System_JobObjects"] }
