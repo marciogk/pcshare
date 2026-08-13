@@ -180,6 +180,41 @@ Este é o item de maior risco de cronograma do projeto inteiro. Não é opcional
 e não dá para "adicionar depois" — a separação de processos precisa estar
 prevista no design desde já, mesmo que o Sprint 0 rode como processo único.
 
+#### Onde fica cada metade da pipeline (13/08/2026)
+
+A divisão não é livre; cada metade está onde está por uma razão que a impede
+de estar do outro lado.
+
+| | agente | supervisor |
+|---|---|---|
+| captura e encode | ✅ | ❌ está na sessão 0, não vê tela |
+| injeção de entrada | ✅ | ❌ não está preso ao desktop |
+| QUIC, Noise, ID e senha | ❌ morre a cada troca de desktop | ✅ |
+| contrapressão | ❌ não enxerga a fila de saída | ✅ |
+
+O encode **tem** de ficar no agente: a textura vive na GPU dentro da sessão do
+usuário, e mandar quadro cru seria GPU → CPU → canal → CPU → GPU, o desvio que
+a Fase 1 eliminou por custar 11,7 ms. Cru são ~4 MB; codificado, ~8 KB.
+
+A sessão de rede **tem** de ficar no supervisor: se morasse no agente, cada
+prompt de UAC trocaria "tela congelada por um instante" por "conexão caiu".
+
+O canal entre os dois é um named pipe duplex e persistente, em **E/S
+sobreposta**. Não é preferência: um descritor síncrono do Windows serializa
+toda a E/S sobre ele, ainda que em direções opostas, e a thread leitora parada
+em `ReadFile` bloqueia a escrita que traria os dados.
+
+**O agente não transmite sem viewer.** Sem isso ele enche o buffer do cano em
+torno de meio segundo e bloqueia para sempre — levando junto os relatos de
+troca de desktop, ou seja, a Fase 3 inteira.
+
+**Quem fala pelo cano é verificado por PID.** Estreitar a permissão não basta:
+o agente do desktop do usuário roda com o token do usuário, então o usuário
+precisa ter acesso ao cano — e passaria a ler os quadros do `Winlogon`, que não
+consegue capturar sozinho. O supervisor só conversa com processos que ele mesmo
+lançou; para não haver corrida, o agente nasce suspenso e é liberado depois de
+autorizado.
+
 ### D6 — Sinalização não trafega vídeo
 
 Servidor de sinalização faz autenticação, resolve ID → peer, e intermedeia a

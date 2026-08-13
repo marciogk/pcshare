@@ -543,14 +543,32 @@ pub fn log(msg: &str) {
     use std::io::Write;
     let _ = std::io::stdout().flush();
 
-    if let Ok(mut f) = std::fs::OpenOptions::new()
+    let escreveu = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(caminho_do_log())
-    {
-        let _ = f.write_all(linha.as_bytes());
+        .and_then(|mut f| f.write_all(linha.as_bytes()))
+        .is_ok();
+
+    // Falhar em silêncio aqui já custou caro: o arquivo da linha do tempo era
+    // criado por SYSTEM com `Usuários:(RX)`, e os processos em contexto de
+    // usuário perdiam metade dos eventos sem que nada indicasse isso.
+    //
+    // O mesmo vale para este log: rodando `supervisor` em modo console depois
+    // de o serviço ter criado o arquivo, o usuário não tem permissão de
+    // escrita, e tudo o que sobra é a saída no console — que ninguém guarda.
+    if !escreveu && !AVISOU_DO_LOG.swap(true, Ordering::Relaxed) {
+        print!(
+            "AVISO: não consigo escrever em {} — só o console verá estas linhas.\n\
+             Provavelmente o arquivo pertence a SYSTEM; apague-o como administrador.\n",
+            caminho_do_log().display()
+        );
+        let _ = std::io::stdout().flush();
     }
 }
+
+/// Para que o aviso saia uma vez, e não a cada linha de log.
+static AVISOU_DO_LOG: AtomicBool = AtomicBool::new(false);
 
 /// `HH:MM:SS.mmm` em horário local, sem depender de biblioteca de datas.
 fn formatar_hora(t: std::time::SystemTime) -> String {

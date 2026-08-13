@@ -17,11 +17,27 @@ decisão D5 previa:
 O canal entre os dois virou **bidirecional e persistente**: vídeo sobe, entrada
 desce. 38 testes passando em release, contra 35 antes.
 
-### O que ainda não foi feito: medir
+### O que foi verificado, e o que não
 
-Nada disto foi exercitado de ponta a ponta. **O código compila e os testes
-unitários passam, mas nenhum quadro atravessou a arquitetura nova ainda.** A
-medição é o próximo passo, e está descrita abaixo.
+Subi o supervisor em modo console e conferi pelos logs:
+
+```
+[19:53:50] sessão: escutando em 0.0.0.0:7000
+[19:53:50] sessão: ID desta máquina 895 570 225
+[19:53:50] agente lançado em 'Default' — 12,1 ms desde a percepção
+[Default] captura ABRIU 1360x768
+[Default] encoder [Intel® Quick Sync Video H.264 Encoder MFT] (VBR, ...)
+[Default] caminho de pixels = GPU direto (sem cópia)
+[Default] vivo em 'Default' | 0 quadros | 0 perdas     ← 12 vezes, 25 s
+```
+
+Ou seja: a sessão sobe, o agente nasce, conecta ao canal, abre a captura e cria
+o encoder por hardware. E **0 quadros** sem viewer conectado, que é o
+comportamento correto — se fossem mais que zero, o agente estaria a caminho de
+congelar.
+
+**O que não foi verificado: imagem.** Nenhum quadro atravessou a arquitetura
+nova, porque isso exige um viewer. É o próximo passo.
 
 ### Três defeitos encontrados durante a migração
 
@@ -127,6 +143,13 @@ Fase 3 e é ali que está o problema.
 **c) Latência e banda,** contra os números do `pcshare-spike`: **53,6 ms**
 tela→exibição e **0,5–0,9 Mbps**. O canal acrescentou uma travessia de
 processo; se a latência subir muito, é ali.
+
+> **`cargo test --release` não gera os executáveis.** Ele compila os binários
+> de teste, não `target\release\pcshare-agent.exe`. Rodei o supervisor achando
+> que testava o código novo e estava executando o de três dias antes — os
+> sintomas eram coerentes o bastante para enganar. **Sempre `cargo build
+> --release` antes de qualquer teste manual**, e na dúvida confira a data:
+> `ls -l target/release/pcshare-agent.exe`.
 
 > **Atenção ao instrumento.** A medição de latência do spike só valia com host
 > e viewer no mesmo processo, porque comparava dois `Instant` da mesma origem.
