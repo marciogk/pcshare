@@ -284,6 +284,31 @@ cadeia de atualização automática precisa validar assinatura.
 > OV basta ou se o EV é obrigatório para passar pelo Smart App Control, e
 > quanto tempo leva para acumular reputação a partir do zero.
 
+**OV e EV, a diferença que importa:**
+
+| | OV (Organization Validation) | EV (Extended Validation) |
+|---|---|---|
+| Verificação | que a empresa existe: CNPJ, endereço | existência legal, presença física, operação |
+| Reputação no Windows | **precisa ser construída** | **imediata** |
+| Custo | menor | bem maior |
+| Emissão | dias | semanas |
+
+A linha da reputação é a decisiva. Com OV, mesmo assinado, o Windows continua
+avisando o usuário até acumular downloads suficientes — ou seja, **os primeiros
+clientes veriam avisos**. Com EV, não há essa carência.
+
+Dois detalhes práticos que costumam surpreender:
+
+- Desde 2023 a chave privada precisa viver em **hardware** ou serviço
+  equivalente, não mais num arquivo. Isso muda como a assinatura entra na
+  compilação.
+- A Microsoft oferece um serviço de assinatura por mensalidade, sem token
+  físico, que pode mudar a conta inteira para um fornecedor pequeno. **Verificar
+  disponibilidade e termos atuais** — é informação que envelhece rápido.
+
+**Pesquisa adiada em 10/08/2026**, a pedido. Não depende de código e pode
+correr em paralelo com o desenvolvimento.
+
 **A mensagem que o Windows mostra, capturada em 03/08/2026:**
 
 ![Bloqueio do Smart App Control](img/smart-app-control-bloqueio.png)
