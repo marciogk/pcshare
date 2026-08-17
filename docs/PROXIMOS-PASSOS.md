@@ -1,6 +1,6 @@
 # Próximos passos
 
-Atualizado em 13/08/2026, ao encerrar.
+Atualizado em 17/08/2026, ao encerrar.
 
 ---
 
@@ -36,8 +36,9 @@ o encoder por hardware. E **0 quadros** sem viewer conectado, que é o
 comportamento correto — se fossem mais que zero, o agente estaria a caminho de
 congelar.
 
-**O que não foi verificado: imagem.** Nenhum quadro atravessou a arquitetura
-nova, porque isso exige um viewer. É o próximo passo.
+*(Escrito em 13/08, quando nenhum quadro tinha atravessado ainda. Em 17/08 a
+imagem foi confirmada em loopback e entre as duas máquinas — ver o item 1 de
+"O que vem a seguir".)*
 
 ### Três defeitos encontrados durante a migração
 
@@ -146,9 +147,22 @@ embute o host no próprio processo e mede a arquitetura que deixou de existir.
 > antes de imprimir: se o trecho não couber dentro do total, o programa diz que
 > não sabe em vez de inventar.
 
-**Falta o teste que justifica a arquitetura inteira** — o prompt de UAC com
-viewer conectado — e a validação entre as duas máquinas. Ambos exigem alguém
-na máquina.
+**As duas máquinas funcionam.** Em 17/08 o notebook exibiu a tela deste PC
+pela arquitetura nova, numa sessão real. O log da última sessão:
+
+```
+sessão: 600 quadros repassados, 0 descartados, 104 eventos de entrada (NÃO injetados)
+supervisor encerrado (0 trocas de desktop)
+```
+
+Zero descartes, e o `somente_ver=1` recebendo a entrada do viewer sem injetar.
+O contador de quadros ficando parado por três relatórios e depois disparando é
+a supressão de tela ociosa trabalhando.
+
+**Falta o teste que justifica a arquitetura inteira**: aquele `0 trocas de
+desktop` é o que ainda não foi exercitado. Nenhum prompt de UAC aconteceu
+enquanto o viewer estava conectado — e é essa a pergunta em aberto: a sessão
+sobrevive ao Secure Desktop?
 
 > **O viewer do notebook não precisa ser atualizado.** `proto.rs` não muda
 > desde 29/07 e `quic`/`secure` desde 30/07; o binário lá é posterior. Tudo o
