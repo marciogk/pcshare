@@ -156,9 +156,28 @@ na máquina.
 
 > **`--view-only` no viewer não protege nada.** É uma chave do lado do host no
 > `pcshare-spike`; o viewer manda entrada de qualquer jeito. Quem protege a
-> máquina é a máquina: **`PCSHARE_SOMENTE_VER=1`** no supervisor. Sem ela,
-> quem conectar move o mouse e digita de verdade — e o supervisor avisa
-> disso na subida, em vez de deixar alguém descobrir depois.
+> máquina é a máquina: `somente_ver=1` na configuração do supervisor. Sem
+> isso, quem conectar move o mouse e digita de verdade — e o supervisor avisa
+> na subida, em vez de deixar alguém descobrir depois.
+
+> **`Start-Service` não enxerga `$env:`.** Um serviço do Windows recebe o
+> ambiente do **sistema**, não o do console de quem o iniciou. Definir
+> `$env:PCSHARE_SENHA` antes de `Start-Service` não tem efeito nenhum — e em
+> 17/08 isso custou uma sessão inteira de teste: o serviço subiu com senha
+> sorteada e controle habilitado, ninguém conseguiu conectar, e o teste que
+> importava não foi feito.
+>
+> Por isso a configuração vive em **`C:\ProgramData\PCShare\config.txt`**:
+>
+> ```text
+> senha=482913
+> bind=0.0.0.0:7000
+> somente_ver=1
+> ```
+>
+> Vale nos dois modos. Variáveis de ambiente continuam funcionando e têm
+> prioridade, o que é prático em modo console. Quando a senha não vem da
+> configuração, o log diz que foi sorteada **e por quê**.
 
 #### Como rodar o que falta
 
@@ -185,6 +204,13 @@ porta, e `N agentes transmitindo` quando o viewer conectar. No notebook:
 viewer conectado, provocar um prompt de UAC. O esperado: a imagem congela por
 volta de 90 ms e volta, **e a sessão não cai**. Se cair, a migração desfez a
 Fase 3 e é ali que está o problema.
+
+> **Provoque três ou quatro prompts, não um.** A primeira janela mede o
+> nascimento do agente do `Winlogon`, que é caso diferente do regime
+> permanente. Com o aquecimento isso deixou de valer — o agente já existe
+> desde a subida — mas medir uma vez só continua não dizendo se o número se
+> repete. Confirme no log que a linha de `aquecimento` apareceu logo no
+> início; se não apareceu, a primeira janela ainda será a lenta.
 
 **c) Latência e banda,** contra os números do `pcshare-spike`: **53,6 ms**
 tela→exibição e **0,5–0,9 Mbps**. O canal acrescentou uma travessia de

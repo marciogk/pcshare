@@ -94,10 +94,19 @@ pub fn supervisionar(modo: Modo, parar: &AtomicBool) {
     let servidor = canal::Servidor::abrir(canal::CANO_PADRAO, autorizados.clone());
     log("canal aberto para os agentes");
 
+    let cfg = crate::config::Config::carregar();
+    cfg.relatar();
+
     // A sessão de rede leva o `Servidor` embora: a partir daqui é ela que fala
     // com os agentes, e o que o supervisor ainda precisa saber — trocas de
     // desktop — volta por `rx`.
-    crate::sessao::iniciar(servidor, tx, endereco_de_escuta(), senha_da_sessao());
+    crate::sessao::iniciar(
+        servidor,
+        tx,
+        endereco_de_escuta(&cfg),
+        senha_da_sessao(&cfg),
+        cfg.somente_ver(),
+    );
 
 
     // O alvo começa no desktop do usuário, que é o caso comum. A partir daí
@@ -153,15 +162,50 @@ pub fn supervisionar(modo: Modo, parar: &AtomicBool) {
             }
         }
 
-        // ---- 3. garante um agente vivo para o desktop ativo
-        if !agentes.contains_key(&alvo) {
-            if mortes_rapidas > 0 {
+        // ---- 3. garante agentes vivos onde eles precisam estar
+        //
+        // Além do desktop ativo, mantém o `Winlogon` **quente**. Sem isso ele
+        // só nasce no primeiro prompt de UAC, e nascer ficou caro: o agente
+        // agora monta um encoder H.264 por hardware antes do primeiro quadro.
+        //
+        // Medido em 17/08/2026, decompondo a linha do tempo da primeira
+        // janela de cegueira, que deu 557 ms:
+        //
+        //     perceber → lançar                12,2 ms
+        //     lançar → primeira instrução     150,7 ms
+        //     abrir a captura                  36,6 ms
+        //     captura → primeiro quadro       362,7 ms   ← o encoder
+        //
+        // A segunda janela, com o agente já existindo, deu 77,8 ms. Ou seja,
+        // 479 dos 557 ms eram só o nascimento — e nascer antes da hora é de
+        // graça, porque acontece fora do caminho crítico.
+        //
+        // Só em modo serviço: alcançar o `Winlogon` exige token de SYSTEM, e
+        // em modo console o agente morreria no berço, envenenando o recuo
+        // exponencial que protege o agente de verdade.
+        let mut a_garantir = vec![alvo.clone()];
+        if modo == Modo::Servico && alvo != "Winlogon" {
+            a_garantir.push("Winlogon".to_string());
+        }
+
+        for nome_alvo in a_garantir {
+            let e_o_ativo = nome_alvo == alvo;
+            if agentes.contains_key(&nome_alvo) {
+                continue;
+            }
+            // O recuo só vale para o agente do desktop ativo. Aplicá-lo ao
+            // aquecimento faria uma falha de pré-lançamento atrasar quem está
+            // no caminho crítico.
+            if e_o_ativo && mortes_rapidas > 0 {
                 let espera = INTERVALO * (1u32 << mortes_rapidas.min(6));
                 std::thread::sleep(espera.min(RECUO_MAXIMO));
             }
+            let alvo = nome_alvo;
             let desejado = desktop_por_nome(&alvo);
             let percebido = Instant::now();
-            let _ = linha_do_tempo::registrar("supervisor", "percebeu");
+            if e_o_ativo {
+                let _ = linha_do_tempo::registrar("supervisor", "percebeu");
+            }
 
             match lancar(&agente, &desejado, modo) {
                 Ok(a) => {
@@ -179,9 +223,14 @@ pub fn supervisionar(modo: Modo, parar: &AtomicBool) {
                     a.liberar();
                     let _ = linha_do_tempo::registrar("supervisor", &format!("lancou-{alvo}"));
                     log(&format!(
-                        "agente lançado em '{alvo}' (pid {}) — {:.1} ms desde a percepção",
+                        "agente lançado em '{alvo}' (pid {}) — {:.1} ms {}",
                         a.pid,
-                        percebido.elapsed().as_secs_f64() * 1000.0
+                        percebido.elapsed().as_secs_f64() * 1000.0,
+                        if e_o_ativo {
+                            "desde a percepção"
+                        } else {
+                            "(aquecimento, fora do caminho crítico)"
+                        }
                     ));
                     agentes.insert(alvo.clone(), a);
                 }
@@ -493,25 +542,39 @@ fn nome_do_desktop(d: &InputDesktop) -> &str {
     }
 }
 
-/// Onde a sessão escuta. Um serviço não tem linha de comando útil depois de
-/// instalado, então a configuração vem do ambiente.
-fn endereco_de_escuta() -> std::net::SocketAddr {
+/// Onde a sessão escuta.
+fn endereco_de_escuta(cfg: &crate::config::Config) -> std::net::SocketAddr {
     const PADRAO: &str = "0.0.0.0:7000";
-    let bruto = std::env::var("PCSHARE_BIND").unwrap_or_else(|_| PADRAO.into());
+    let bruto = cfg.bind().unwrap_or_else(|| PADRAO.into());
     bruto.parse().unwrap_or_else(|_| {
-        log(&format!("PCSHARE_BIND inválido ('{bruto}'); usando {PADRAO}"));
+        log(&format!("bind inválido ('{bruto}'); usando {PADRAO}"));
         PADRAO.parse().expect("endereço padrão é válido")
     })
 }
 
 /// Senha da sessão.
 ///
-/// Sorteada quando não vem do ambiente, e registrada no log — que é o único
-/// lugar onde alguém pode lê-la num serviço sem interface. Isto é arranjo de
-/// desenvolvimento, não de produto: um serviço de verdade sorteia a cada
-/// atendimento e mostra a senha na tela da máquina que está sendo assistida.
-fn senha_da_sessao() -> String {
-    std::env::var("PCSHARE_SENHA").unwrap_or_else(|_| pcshare_core::secure::random_password())
+/// Sorteada quando não vem da configuração, e registrada no log — que é o
+/// único lugar onde alguém pode lê-la num serviço sem interface. Isto é
+/// arranjo de desenvolvimento, não de produto: um serviço de verdade sorteia a
+/// cada atendimento e mostra a senha na tela da máquina que está sendo
+/// assistida.
+fn senha_da_sessao(cfg: &crate::config::Config) -> String {
+    match cfg.senha() {
+        Some(s) => s,
+        None => {
+            let sorteada = pcshare_core::secure::random_password();
+            // Dizer que foi sorteada, e não só qual é: quem definiu a senha e
+            // vê outra no log precisa entender **por quê** — foi assim que uma
+            // sessão inteira de teste se perdeu, com as variáveis definidas no
+            // console e o serviço lendo o ambiente do sistema.
+            log(&format!(
+                "senha não veio da configuração ({}); sorteando",
+                crate::config::caminho().display()
+            ));
+            sorteada
+        }
+    }
 }
 
 fn rotulo_modo(m: Modo) -> &'static str {

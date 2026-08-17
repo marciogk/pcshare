@@ -51,19 +51,28 @@ const ESPERA: Duration = Duration::from_millis(2);
 /// **Precisa ser decidido aqui, no host.** O `--view-only` do `pcshare-spike`
 /// é uma chave do lado do host; o viewer manda entrada de qualquer jeito. Um
 /// viewer não é lugar para essa decisão — quem protege a máquina é a máquina.
-fn somente_ver() -> bool {
-    std::env::var("PCSHARE_SOMENTE_VER").is_ok_and(|v| v != "0")
-}
+///
+/// É um valor, e não uma consulta à configuração a cada evento: assim o modo
+/// não pode mudar no meio de uma sessão sem ninguém ter pedido.
+#[derive(Clone, Copy)]
+pub struct SomenteVer(pub bool);
 
 /// Sobe a thread que atende viewers, para sempre.
 ///
 /// Consome o `Servidor` do canal: a partir daqui é esta thread que fala com os
 /// agentes. O que o supervisor ainda precisa saber — trocas de desktop — sobe
 /// por `tx_desktop`.
-pub fn iniciar(servidor: canal::Servidor, tx_desktop: Sender<String>, endereco: SocketAddr, senha: String) {
+pub fn iniciar(
+    servidor: canal::Servidor,
+    tx_desktop: Sender<String>,
+    endereco: SocketAddr,
+    senha: String,
+    somente_ver: bool,
+) {
+    let modo = SomenteVer(somente_ver);
     std::thread::Builder::new()
         .name("pcshare-sessao".into())
-        .spawn(move || atender_sempre(servidor, tx_desktop, endereco, senha))
+        .spawn(move || atender_sempre(servidor, tx_desktop, endereco, senha, modo))
         .ok();
 }
 
@@ -72,6 +81,7 @@ fn atender_sempre(
     tx_desktop: Sender<String>,
     endereco: SocketAddr,
     senha: String,
+    modo: SomenteVer,
 ) {
     let identidade = match identidade_da_maquina() {
         Ok(i) => i,
@@ -95,11 +105,11 @@ fn atender_sempre(
     log(&format!("sessão: escutando em {endereco}"));
     log(&format!("sessão: ID desta máquina {}", identidade.display_id()));
     log(&format!("sessão: senha {senha}"));
-    log(if somente_ver() {
+    log(if modo.0 {
         "sessão: SOMENTE VISUALIZAÇÃO — entrada do viewer será descartada"
     } else {
         "sessão: CONTROLE HABILITADO — quem conectar move o mouse e digita aqui \
-         (defina PCSHARE_SOMENTE_VER=1 para impedir)"
+         (somente_ver=1 na configuração para impedir)"
     });
 
     // Aceitar numa thread à parte, e não aqui, por um motivo concreto: este
@@ -135,9 +145,6 @@ fn atender_sempre(
         })
         .ok();
 
-    // Uma sessão que acaba não pode encerrar o atendimento: o host está na
-    // máquina que o usuário justamente não alcança. Foi o defeito mais grave
-    // encontrado no teste entre duas máquinas.
     // As dimensões vivem **fora** da sessão, e isso não é detalhe: o agente
     // anuncia `Pronto` uma vez, ao nascer, o que costuma ser bem antes de
     // alguém conectar. Guardá-las dentro da sessão fazia o anúncio ser comido
@@ -145,6 +152,9 @@ fn atender_sempre(
     // quadros. Medido: 819 descartados, 0 repassados.
     let mut dimensoes: Option<(u32, u32)> = None;
 
+    // Uma sessão que acaba não pode encerrar o atendimento: o host está na
+    // máquina que o usuário justamente não alcança. Foi o defeito mais grave
+    // encontrado no teste entre duas máquinas.
     let mut n = 0u64;
     loop {
         // Sem viewer, escoa o canal e volta a olhar. É aqui que os relatos de
@@ -163,7 +173,7 @@ fn atender_sempre(
                 log(&format!("sessão {n}: cifrada com {}", sec.remote_fingerprint()));
                 let ligados = servidor.enviar_a_todos(&Mensagem::Capturar(true));
                 log(&format!("sessão {n}: {ligados} agentes transmitindo"));
-                let r = servir(sec, &servidor, &tx_desktop, &mut dimensoes);
+                let r = servir(sec, &servidor, &tx_desktop, &mut dimensoes, modo);
                 servidor.enviar_a_todos(&Mensagem::Capturar(false));
                 r
             }
@@ -199,6 +209,7 @@ fn servir<T: Transport>(
     servidor: &canal::Servidor,
     tx_desktop: &Sender<String>,
     dimensoes: &mut Option<(u32, u32)>,
+    modo: SomenteVer,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // O viewer não desenha nada antes do `Hello`, e só o agente conhece a
     // resolução — o supervisor está na sessão 0, cego.
@@ -310,7 +321,7 @@ fn servir<T: Transport>(
                     // Reencaminha já serializado: o agente decodifica do outro
                     // lado com o mesmo protocolo, sem tradução no meio.
                     if let Some(id) = agente_ativo
-                        && !somente_ver()
+                        && !modo.0
                     {
                         let _ = servidor.enviar(id, &Mensagem::Entrada(m.encode()));
                     }
@@ -330,7 +341,7 @@ fn servir<T: Transport>(
             log(&format!(
                 "sessão: {enviados} quadros repassados, {descartados} descartados, \
                  {entrada_recebida} eventos de entrada{}, {} agentes no canal",
-                if somente_ver() { " (NÃO injetados)" } else { "" },
+                if modo.0 { " (NÃO injetados)" } else { "" },
                 servidor.conectados()
             ));
             proximo_relato += Duration::from_secs(5);

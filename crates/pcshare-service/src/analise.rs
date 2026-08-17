@@ -128,18 +128,36 @@ pub fn analisar(pasta: Option<String>) {
     // Quando não é, o agente existiu mas não conseguiu registrar — e casar os
     // eventos restantes produziria pares entre agentes que nunca se
     // sucederam. Foi assim que apareceram 10 segundos de cegueira inexistente.
-    let mut lancamentos_mudos = Vec::new();
-    for (i, e) in eventos.iter().enumerate() {
-        if e.tipo.starts_with("lancou-") {
-            let houve_inicio = eventos[i + 1..]
-                .iter()
-                .take_while(|p| !p.tipo.starts_with("lancou-"))
-                .any(|p| p.tipo == "inicio");
-            if !houve_inicio {
-                lancamentos_mudos.push(e.tipo.trim_start_matches("lancou-").to_string());
-            }
+    //
+    // Conta por desktop, em vez de exigir que cada lançamento seja seguido
+    // pelo seu nascimento. A versão anterior olhava só até o próximo
+    // `lancou-`, o que pressupunha lançamentos serializados — e deixou de
+    // valer quando o supervisor passou a manter o `Winlogon` quente: dois
+    // lançamentos ficam em voo ao mesmo tempo, o segundo aparece antes do
+    // `inicio` do primeiro, e uma medição perfeitamente boa seria recusada.
+    //
+    // Contar é indiferente à ordem e continua pegando o caso que importa: um
+    // agente que rodou mas não conseguiu escrever na linha do tempo.
+    let mut lancados: std::collections::HashMap<&str, i32> = std::collections::HashMap::new();
+    for e in &eventos {
+        if let Some(d) = e.tipo.strip_prefix("lancou-") {
+            *lancados.entry(d).or_default() += 1;
+        } else if e.tipo == "inicio" {
+            *lancados.entry(e.desktop.as_str()).or_default() -= 1;
         }
     }
+    let mut lancamentos_mudos: Vec<String> = lancados
+        .into_iter()
+        .filter(|&(_, saldo)| saldo > 0)
+        .map(|(d, saldo)| {
+            if saldo > 1 {
+                format!("{d} ({saldo}x)")
+            } else {
+                d.to_string()
+            }
+        })
+        .collect();
+    lancamentos_mudos.sort();
     if !lancamentos_mudos.is_empty() {
         println!("{:=<74}", "");
         println!("MEDIÇÃO INVÁLIDA");

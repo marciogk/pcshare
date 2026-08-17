@@ -37,6 +37,7 @@
 //!     pcshare-service.exe desinstalar
 
 mod analise;
+mod config;
 mod servico;
 mod sessao;
 mod supervisor;
