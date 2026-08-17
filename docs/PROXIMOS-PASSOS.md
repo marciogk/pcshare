@@ -206,11 +206,13 @@ volta de 90 ms e volta, **e a sessão não cai**. Se cair, a migração desfez a
 Fase 3 e é ali que está o problema.
 
 > **Provoque três ou quatro prompts, não um.** A primeira janela mede o
-> nascimento do agente do `Winlogon`, que é caso diferente do regime
-> permanente. Com o aquecimento isso deixou de valer — o agente já existe
-> desde a subida — mas medir uma vez só continua não dizendo se o número se
-> repete. Confirme no log que a linha de `aquecimento` apareceu logo no
-> início; se não apareceu, a primeira janela ainda será a lenta.
+> nascimento do agente do `Winlogon` — hoje cerca de 550 ms, dos quais 362 ms
+> são o encoder H.264 sendo montado. Da segunda em diante o agente já existe, e
+> o número cai para a faixa de 80 ms. As duas coisas são reais; medir uma vez
+> só não distingue qual você está vendo.
+>
+> O log agora contém **apenas a execução atual** — a anterior fica em
+> `supervisor-anterior.log`. Pode ler do começo.
 
 **c) Latência e banda,** contra os números do `pcshare-spike`: **53,6 ms**
 tela→exibição e **0,5–0,9 Mbps**. O canal acrescentou uma travessia de
@@ -230,11 +232,39 @@ processo; se a latência subir muito, é ali.
 > errado para baixo**, que é o pior caso. Três medições deste projeto já saíram
 > plausíveis e falsas.
 
-### 2. Tela de bloqueio e Ctrl+Alt+Del 🟢
+### 2. Tirar o encoder do caminho crítico 🟡 tentado e revertido
+
+A primeira janela de cegueira custa ~557 ms contra ~78 ms das seguintes, e
+362 ms disso é o encoder H.264 nascendo junto com o agente do `Winlogon`, que
+só é criado no primeiro prompt de UAC.
+
+**Pré-lançar o agente do `Winlogon` foi tentado em 17/08 e reverteu-se**, por
+duas razões que se somaram num laço de seis processos por segundo:
+
+1. O agente **encerra** quando a captura falha ao nascer, e um agente do
+   `Winlogon` criado enquanto o `Default` está à frente não duplica nada. Ele
+   morria no berço, sempre.
+2. O recuo exponencial tinha sido excluído do aquecimento "para não atrasar o
+   caminho crítico" — o que deixou justamente o agente que morre em ciclo sem
+   espera nenhuma, enquanto as mortes dele incrementavam o contador que atrasa
+   o agente de verdade.
+
+Para retomar, **nesta ordem**:
+
+1. O agente precisa **sobreviver a nascer cego**, entrando no laço de
+   recuperação em vez de encerrar. Ele já sabe ficar cego no meio da vida; só
+   o nascimento é assimétrico.
+2. O encoder precisa ser montado sem depender da captura para saber as
+   dimensões — `IDXGIOutput::GetDesc` responde de qualquer desktop, sem
+   duplicação. Sem isso o agente pré-lançado ainda pagaria os 362 ms no
+   momento do UAC, e o aquecimento não serviria para nada.
+3. Só então pré-lançar, **com o recuo valendo para todos**.
+
+### 3. Tela de bloqueio e Ctrl+Alt+Del 🟢
 
 Mesma mecânica já provada, episódios mais longos. Baixo risco.
 
-### 3. Reduzir os 90 ms restantes 🟡 retorno pequeno
+### 4. Reduzir os 90 ms restantes 🟡 retorno pequeno
 
 Quase todos são a pausa de 50 ms entre tentativas de recuperar a captura no
 agente ocioso. Baixá-la reduziria quase na mesma proporção, mas com três ou

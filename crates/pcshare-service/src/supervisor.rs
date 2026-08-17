@@ -59,6 +59,10 @@ pub enum Modo {
 }
 
 pub fn supervisionar(modo: Modo, parar: &AtomicBool) {
+    // Antes de qualquer linha: assim o arquivo contém esta execução e mais
+    // nada, e a anterior fica em `supervisor-anterior.log`.
+    rotacionar_log();
+
     let Some(agente) = caminho_do_agente() else {
         log("pcshare-agent.exe não encontrado ao lado do executável");
         return;
@@ -162,50 +166,35 @@ pub fn supervisionar(modo: Modo, parar: &AtomicBool) {
             }
         }
 
-        // ---- 3. garante agentes vivos onde eles precisam estar
+        // ---- 3. garante um agente vivo para o desktop ativo
         //
-        // Além do desktop ativo, mantém o `Winlogon` **quente**. Sem isso ele
-        // só nasce no primeiro prompt de UAC, e nascer ficou caro: o agente
-        // agora monta um encoder H.264 por hardware antes do primeiro quadro.
+        // **Só para o desktop ativo.** Uma versão de 17/08/2026 mantinha
+        // também um agente do `Winlogon` quente, para tirar do caminho crítico
+        // os 362 ms que o encoder H.264 custa para nascer. A ideia continua
+        // certa, mas a implementação estava errada de duas formas, e as duas
+        // se somaram num laço de seis processos por segundo:
         //
-        // Medido em 17/08/2026, decompondo a linha do tempo da primeira
-        // janela de cegueira, que deu 557 ms:
+        // 1. O agente **encerra** quando a captura falha ao nascer, e um
+        //    agente do `Winlogon` criado enquanto o `Default` está à frente
+        //    não consegue duplicar coisa alguma. Ele morria no berço, sempre.
+        // 2. O recuo exponencial foi excluído do aquecimento "para não atrasar
+        //    o caminho crítico" — o que deixou justamente o agente que morre
+        //    em ciclo sem nenhuma espera, enquanto as mortes dele
+        //    incrementavam o contador que atrasa o agente de verdade.
         //
-        //     perceber → lançar                12,2 ms
-        //     lançar → primeira instrução     150,7 ms
-        //     abrir a captura                  36,6 ms
-        //     captura → primeiro quadro       362,7 ms   ← o encoder
-        //
-        // A segunda janela, com o agente já existindo, deu 77,8 ms. Ou seja,
-        // 479 dos 557 ms eram só o nascimento — e nascer antes da hora é de
-        // graça, porque acontece fora do caminho crítico.
-        //
-        // Só em modo serviço: alcançar o `Winlogon` exige token de SYSTEM, e
-        // em modo console o agente morreria no berço, envenenando o recuo
-        // exponencial que protege o agente de verdade.
-        let mut a_garantir = vec![alvo.clone()];
-        if modo == Modo::Servico && alvo != "Winlogon" {
-            a_garantir.push("Winlogon".to_string());
-        }
-
-        for nome_alvo in a_garantir {
-            let e_o_ativo = nome_alvo == alvo;
-            if agentes.contains_key(&nome_alvo) {
-                continue;
-            }
-            // O recuo só vale para o agente do desktop ativo. Aplicá-lo ao
-            // aquecimento faria uma falha de pré-lançamento atrasar quem está
-            // no caminho crítico.
-            if e_o_ativo && mortes_rapidas > 0 {
+        // Reaquecer exige antes que o agente **sobreviva a nascer cego**, e
+        // que consiga montar o encoder sem depender da captura para saber as
+        // dimensões (`IDXGIOutput::GetDesc` responde de qualquer desktop).
+        // Sem isso, pré-lançar é trocar 480 ms de cegueira por um laço de
+        // criação de processos.
+        if !agentes.contains_key(&alvo) {
+            if mortes_rapidas > 0 {
                 let espera = INTERVALO * (1u32 << mortes_rapidas.min(6));
                 std::thread::sleep(espera.min(RECUO_MAXIMO));
             }
-            let alvo = nome_alvo;
             let desejado = desktop_por_nome(&alvo);
             let percebido = Instant::now();
-            if e_o_ativo {
-                let _ = linha_do_tempo::registrar("supervisor", "percebeu");
-            }
+            let _ = linha_do_tempo::registrar("supervisor", "percebeu");
 
             match lancar(&agente, &desejado, modo) {
                 Ok(a) => {
@@ -223,14 +212,9 @@ pub fn supervisionar(modo: Modo, parar: &AtomicBool) {
                     a.liberar();
                     let _ = linha_do_tempo::registrar("supervisor", &format!("lancou-{alvo}"));
                     log(&format!(
-                        "agente lançado em '{alvo}' (pid {}) — {:.1} ms {}",
+                        "agente lançado em '{alvo}' (pid {}) — {:.1} ms desde a percepção",
                         a.pid,
-                        percebido.elapsed().as_secs_f64() * 1000.0,
-                        if e_o_ativo {
-                            "desde a percepção"
-                        } else {
-                            "(aquecimento, fora do caminho crítico)"
-                        }
+                        percebido.elapsed().as_secs_f64() * 1000.0
                     ));
                     agentes.insert(alvo.clone(), a);
                 }
@@ -642,6 +626,29 @@ fn formatar_hora(t: std::time::SystemTime) -> String {
         "{:02}:{:02}:{:02}.{:03}",
         s.wHour, s.wMinute, s.wSecond, s.wMilliseconds
     )
+}
+
+/// Guarda o log da execução anterior e começa um limpo.
+///
+/// Sem isto o arquivo acumula todas as execuções desde sempre, e "veja o
+/// supervisor.log" vira uma caça: em 17/08/2026 ele estava com 2,6 MB, e o
+/// começo do arquivo era de uma compilação de duas semanas antes — com
+/// mensagens que nem existem mais no código. Ler o topo de um arquivo é o
+/// reflexo natural de qualquer pessoa, e o arquivo estava premiando esse
+/// reflexo com informação errada.
+///
+/// Um arquivo por execução também combina com a linha do tempo, que já é
+/// zerada a cada subida pelo mesmo motivo.
+fn rotacionar_log() {
+    let atual = caminho_do_log();
+    if !atual.exists() {
+        return;
+    }
+    let anterior = atual.with_file_name("supervisor-anterior.log");
+    // Falhar aqui não impede nada de funcionar: no pior caso o log continua
+    // acumulando, que é como era antes.
+    let _ = std::fs::remove_file(&anterior);
+    let _ = std::fs::rename(&atual, &anterior);
 }
 
 pub fn caminho_do_log() -> PathBuf {
