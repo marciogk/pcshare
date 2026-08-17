@@ -42,6 +42,19 @@ const LIMITE_DE_FILA: usize = 512 * 1024;
 /// entrada, longo o bastante para o laço não girar em falso.
 const ESPERA: Duration = Duration::from_millis(2);
 
+/// Somente visualização: a entrada do viewer é contada e descartada.
+///
+/// Não é chave de teste. É requisito de produto por dois motivos: uma sessão
+/// de suporte que só observa é o padrão mínimo de privacidade para quem está
+/// do outro lado, e num teste local a injeção realimenta a própria janela.
+///
+/// **Precisa ser decidido aqui, no host.** O `--view-only` do `pcshare-spike`
+/// é uma chave do lado do host; o viewer manda entrada de qualquer jeito. Um
+/// viewer não é lugar para essa decisão — quem protege a máquina é a máquina.
+fn somente_ver() -> bool {
+    std::env::var("PCSHARE_SOMENTE_VER").is_ok_and(|v| v != "0")
+}
+
 /// Sobe a thread que atende viewers, para sempre.
 ///
 /// Consome o `Servidor` do canal: a partir daqui é esta thread que fala com os
@@ -82,6 +95,12 @@ fn atender_sempre(
     log(&format!("sessão: escutando em {endereco}"));
     log(&format!("sessão: ID desta máquina {}", identidade.display_id()));
     log(&format!("sessão: senha {senha}"));
+    log(if somente_ver() {
+        "sessão: SOMENTE VISUALIZAÇÃO — entrada do viewer será descartada"
+    } else {
+        "sessão: CONTROLE HABILITADO — quem conectar move o mouse e digita aqui \
+         (defina PCSHARE_SOMENTE_VER=1 para impedir)"
+    });
 
     // Aceitar numa thread à parte, e não aqui, por um motivo concreto: este
     // laço é o **único** que esvazia o canal dos agentes. Bloqueando em
@@ -206,6 +225,7 @@ fn servir<T: Transport>(
     let mut seq = 0u64;
     let mut descartados = 0u64;
     let mut enviados = 0u64;
+    let mut entrada_recebida = 0u64;
     let mut proximo_relato = Instant::now() + Duration::from_secs(5);
 
     loop {
@@ -286,9 +306,12 @@ fn servir<T: Transport>(
                     t.send(p.channel(), &p.encode())?;
                 }
                 Ok(m @ Message::Input(_)) => {
+                    entrada_recebida += 1;
                     // Reencaminha já serializado: o agente decodifica do outro
                     // lado com o mesmo protocolo, sem tradução no meio.
-                    if let Some(id) = agente_ativo {
+                    if let Some(id) = agente_ativo
+                        && !somente_ver()
+                    {
                         let _ = servidor.enviar(id, &Mensagem::Entrada(m.encode()));
                     }
                 }
@@ -306,7 +329,8 @@ fn servir<T: Transport>(
         if Instant::now() >= proximo_relato {
             log(&format!(
                 "sessão: {enviados} quadros repassados, {descartados} descartados, \
-                 {} agentes no canal",
+                 {entrada_recebida} eventos de entrada{}, {} agentes no canal",
+                if somente_ver() { " (NÃO injetados)" } else { "" },
                 servidor.conectados()
             ));
             proximo_relato += Duration::from_secs(5);

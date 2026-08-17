@@ -150,6 +150,16 @@ embute o host no próprio processo e mede a arquitetura que deixou de existir.
 viewer conectado — e a validação entre as duas máquinas. Ambos exigem alguém
 na máquina.
 
+> **O viewer do notebook não precisa ser atualizado.** `proto.rs` não muda
+> desde 29/07 e `quic`/`secure` desde 30/07; o binário lá é posterior. Tudo o
+> que mudou foi o lado do host.
+
+> **`--view-only` no viewer não protege nada.** É uma chave do lado do host no
+> `pcshare-spike`; o viewer manda entrada de qualquer jeito. Quem protege a
+> máquina é a máquina: **`PCSHARE_SOMENTE_VER=1`** no supervisor. Sem ela,
+> quem conectar move o mouse e digita de verdade — e o supervisor avisa
+> disso na subida, em vez de deixar alguém descobrir depois.
+
 #### Como rodar o que falta
 
 **a) Uma imagem qualquer, em modo console.** Num PowerShell **como
