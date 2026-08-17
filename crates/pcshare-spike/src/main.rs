@@ -172,6 +172,22 @@ fn main() {
                 .unwrap_or(20);
             run_latency(amostras);
         }
+        // Mede a arquitetura de verdade: agente, supervisor e viewer, três
+        // processos. Exige o serviço rodando na **mesma máquina**.
+        Some("latencia-sessao") => {
+            let endereco = args
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| "127.0.0.1:7000".into());
+            let Some(senha) = arg_value("--password") else {
+                eprintln!("informe --password <senha do supervisor>");
+                return;
+            };
+            let amostras: usize = arg_value("--amostras")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(20);
+            latencia_de_sessao(&endereco, &senha, amostras);
+        }
         _ => run_loopback(),
     }
 }
@@ -317,7 +333,69 @@ fn run_latency(amostras: usize) {
         let _ = run_host(t);
     });
 
-    let mut t = TcpTransport::connect(addr).expect("connect falhou");
+    let t = TcpTransport::connect(addr).expect("connect falhou");
+    // Host embutido, mesmo processo: `now_us` de ambos os lados tem a mesma
+    // origem, então a decomposição é válida.
+    medir_latencia(t, amostras, now_us);
+}
+
+/// Mede a latência de uma sessão **real**, contra o serviço.
+///
+/// Existe porque o `latencia` acima embute o host no próprio processo, e desde
+/// que a pipeline migrou para o agente isso deixou de ser a arquitetura que
+/// interessa medir. Aqui os três processos são os de verdade: agente,
+/// supervisor e este viewer.
+///
+/// Só faz sentido com o serviço na **mesma máquina**. O marcador precisa estar
+/// na tela que está sendo capturada, e o relógio de parede precisa ser o mesmo.
+fn latencia_de_sessao(endereco: &str, senha: &str, amostras: usize) {
+    QUIET.store(true, Ordering::SeqCst);
+    println!("PCShare — latência da sessão real (agente + supervisor + viewer)");
+    println!("Não mexa no mouse nem cubra o quadrado no canto superior esquerdo.\n");
+
+    let identity = match load_identity() {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("sem identidade: {e}");
+            return;
+        }
+    };
+    let endereco = match endereco.parse() {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("endereço inválido: {e}");
+            return;
+        }
+    };
+    let t = match QuicTransport::connect(endereco) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("não conectou: {e}");
+            return;
+        }
+    };
+    let sec = match secure::connect(t, &identity, senha) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("handshake recusado: {e} (senha errada?)");
+            return;
+        }
+    };
+    // O agente carimba em relógio de parede justamente para atravessar
+    // processos. Numa máquina só, isto é comparável; entre máquinas não seria,
+    // e a decomposição é descartada mais adiante se os números não fecharem.
+    medir_latencia(sec, amostras, || {
+        pcshare_capture::linha_do_tempo::agora_us() as i64
+    });
+}
+
+/// O laço do marcador, comum às duas medições.
+///
+/// `relogio` precisa ter a **mesma origem** do carimbo que vem em
+/// `Message::Video`. Quando não tem, a decomposição sai absurda — e é por isso
+/// que ela é conferida antes de ser impressa em vez de sair como se fosse
+/// medida.
+fn medir_latencia<T: Transport>(mut t: T, amostras: usize, relogio: fn() -> i64) {
     let Some((w, h)) = wait_hello(&mut t) else {
         eprintln!("conexão encerrada antes do Hello");
         return;
@@ -370,6 +448,19 @@ fn run_latency(amostras: usize) {
                 Ok(Some((_, payload))) => {
                     if let Ok(Message::Video { data, time_us, .. }) = Message::decode(&payload) {
                         capturas.push_back(time_us);
+                        // A fila casa carimbo com quadro **por ordem**, e todo
+                        // quadro que entra no decodificador sem sair — os que
+                        // antecedem o primeiro keyframe, por exemplo —
+                        // desalinha a fila para sempre.
+                        //
+                        // Sem este teto a deriva foi medida crescendo de 10 ms
+                        // para 60 ms ao longo de cinco execuções seguidas, e as
+                        // primeiras passaram por medida boa. Sem B-frames o
+                        // decodificador não segura mais que um ou dois quadros,
+                        // então o que passar disso é desalinho, não pipeline.
+                        while capturas.len() > 3 {
+                            capturas.pop_front();
+                        }
                         let _ = dec.decode(&data, 0);
                     }
                 }
@@ -409,7 +500,7 @@ fn run_latency(amostras: usize) {
                     if esta_branco == esperando_branco {
                         medidas.push(t0.elapsed().as_secs_f64() * 1000.0);
                         if let Some(cap) = capturado_us {
-                            pipeline.push((now_us() - cap) as f64 / 1000.0);
+                            pipeline.push((relogio() - cap) as f64 / 1000.0);
                         }
                         flip_em = None;
                         print!("\r  {} de {amostras} amostras ", medidas.len());
@@ -444,6 +535,27 @@ fn run_latency(amostras: usize) {
     if !pipeline.is_empty() {
         pipeline.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let pipe50 = pct(&pipeline, 0.50);
+
+        // O trecho captura→decodificação é parte do total: tem de ser positivo
+        // e menor que ele. Fora disso, o carimbo do quadro e este relógio não
+        // partem da mesma origem — máquinas diferentes, ou processos com
+        // `Instant` próprio.
+        //
+        // Isto não é zelo excessivo. Uma medição anterior deste projeto
+        // reportou −2073 ms, que era exatamente a diferença entre os instantes
+        // de partida de dois processos, e passou por número real por um tempo.
+        // Um instrumento que não sabe reconhecer a própria falha é pior que
+        // nenhum.
+        if pipe50 <= 0.0 || pipe50 > p50 {
+            println!("\n  DECOMPOSIÇÃO INDISPONÍVEL");
+            println!("    O carimbo dos quadros não compartilha origem com este relógio");
+            println!("    (captura→decodificação daria {pipe50:.1} ms, contra {p50:.1} ms de total).");
+            println!("    O total acima continua válido: ele sai de um relógio só.");
+            println!("\n  Falta: apresentação no viewer e resposta física do monitor.");
+            println!("\n  Estimativa glass-to-glass: {:.0} a {:.0} ms", p50 + 10.0, p50 + 25.0);
+            return;
+        }
+
         println!("\n  DECOMPOSIÇÃO (p50)");
         println!(
             "    tela → captura DXGI : {:>6.1} ms   compositor + ritmo",

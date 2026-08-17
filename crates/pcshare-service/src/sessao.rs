@@ -119,12 +119,19 @@ fn atender_sempre(
     // Uma sessão que acaba não pode encerrar o atendimento: o host está na
     // máquina que o usuário justamente não alcança. Foi o defeito mais grave
     // encontrado no teste entre duas máquinas.
+    // As dimensões vivem **fora** da sessão, e isso não é detalhe: o agente
+    // anuncia `Pronto` uma vez, ao nascer, o que costuma ser bem antes de
+    // alguém conectar. Guardá-las dentro da sessão fazia o anúncio ser comido
+    // pelo escoamento — e sem `Hello` o supervisor descartava todos os
+    // quadros. Medido: 819 descartados, 0 repassados.
+    let mut dimensoes: Option<(u32, u32)> = None;
+
     let mut n = 0u64;
     loop {
         // Sem viewer, escoa o canal e volta a olhar. É aqui que os relatos de
         // desktop continuam chegando ao supervisor com a tela ociosa.
         let Ok(t) = rx_viewer.try_recv() else {
-            if escoar(&servidor, &tx_desktop).is_err() {
+            if escoar(&servidor, &tx_desktop, &mut dimensoes).is_err() {
                 return; // supervisor encerrou
             }
             continue;
@@ -137,7 +144,7 @@ fn atender_sempre(
                 log(&format!("sessão {n}: cifrada com {}", sec.remote_fingerprint()));
                 let ligados = servidor.enviar_a_todos(&Mensagem::Capturar(true));
                 log(&format!("sessão {n}: {ligados} agentes transmitindo"));
-                let r = servir(sec, &servidor, &tx_desktop);
+                let r = servir(sec, &servidor, &tx_desktop, &mut dimensoes);
                 servidor.enviar_a_todos(&Mensagem::Capturar(false));
                 r
             }
@@ -172,11 +179,24 @@ fn servir<T: Transport>(
     mut t: T,
     servidor: &canal::Servidor,
     tx_desktop: &Sender<String>,
+    dimensoes: &mut Option<(u32, u32)>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // O viewer não desenha nada antes do `Hello`, e só o agente conhece a
-    // resolução — o supervisor está na sessão 0, cego. Então a sessão começa
-    // esperando o `Pronto` de algum agente.
-    let mut dimensoes: Option<(u32, u32)> = None;
+    // resolução — o supervisor está na sessão 0, cego.
+    //
+    // Se um agente já anunciou antes desta sessão, manda de saída; senão,
+    // espera o `Pronto`, que o agente reenvia ao ser mandado transmitir.
+    let mut anunciou = false;
+    if let Some((largura, altura)) = *dimensoes {
+        let hello = Message::Hello {
+            width: largura,
+            height: altura,
+            fps: 60,
+        };
+        t.send(hello.channel(), &hello.encode())?;
+        anunciou = true;
+        log(&format!("sessão: tela {largura}x{altura} (já conhecida)"));
+    }
     // Quem produziu o último quadro. É para ele que a entrada vai: agentes
     // cegos não produzem quadro nenhum, então nenhuma coordenação extra é
     // necessária para saber qual está ativo.
@@ -200,10 +220,11 @@ fn servir<T: Transport>(
                     ..
                 } => {
                     agente_ativo = Some(id);
-                    if dimensoes.is_none() {
-                        // Quadro antes do `Pronto` não deveria acontecer, mas
-                        // se acontecer, descartar é melhor que mandar vídeo
-                        // que o viewer não sabe desenhar.
+                    if !anunciou {
+                        // O `Pronto` vem da thread de entrada do agente e o
+                        // quadro do laço principal, então um quadro pode
+                        // chegar primeiro. Descartar é melhor que mandar vídeo
+                        // que o viewer ainda não sabe desenhar.
                         descartados += 1;
                     } else if t.pending_out() > LIMITE_DE_FILA {
                         // O encode já foi gasto no agente e se perde aqui.
@@ -224,14 +245,15 @@ fn servir<T: Transport>(
                     }
                 }
                 Mensagem::Pronto { largura, altura } => {
-                    if dimensoes.is_none() {
-                        dimensoes = Some((largura, altura));
+                    *dimensoes = Some((largura, altura));
+                    if !anunciou {
                         let hello = Message::Hello {
                             width: largura,
                             height: altura,
                             fps: 60,
                         };
                         t.send(hello.channel(), &hello.encode())?;
+                        anunciou = true;
                         log(&format!("sessão: anunciada tela {largura}x{altura}"));
                         // O agente pode já estar codificando há bastante tempo;
                         // sem isto o viewer esperaria o próximo keyframe
@@ -296,15 +318,25 @@ fn servir<T: Transport>(
 ///
 /// Bloqueia por até `ESPERA`, então quem chama pode voltar a olhar se um
 /// viewer chegou sem girar em falso. Devolve `Err` quando o supervisor sumiu.
-fn escoar(servidor: &canal::Servidor, tx_desktop: &Sender<String>) -> Result<(), ()> {
+fn escoar(
+    servidor: &canal::Servidor,
+    tx_desktop: &Sender<String>,
+    dimensoes: &mut Option<(u32, u32)>,
+) -> Result<(), ()> {
     let mut m = servidor.receber_ate(ESPERA);
     while let Some((_, msg)) = m.take() {
-        // Quadros são descartados: os agentes deveriam estar em espera, e um
-        // que ainda esteja transmitindo não pode encher o cano até travar.
-        if let Mensagem::Desktop(nome) = msg
-            && tx_desktop.send(nome).is_err()
-        {
-            return Err(());
+        match msg {
+            Mensagem::Desktop(nome) => {
+                if tx_desktop.send(nome).is_err() {
+                    return Err(());
+                }
+            }
+            // Guardar, e não descartar: é aqui que o anúncio do agente chega,
+            // tipicamente segundos antes de existir viewer para recebê-lo.
+            Mensagem::Pronto { largura, altura } => *dimensoes = Some((largura, altura)),
+            // Quadros vão fora: os agentes deveriam estar em espera, e um que
+            // ainda esteja transmitindo não pode encher o cano até travar.
+            _ => {}
         }
         m = servidor.receber();
     }
@@ -314,7 +346,8 @@ fn escoar(servidor: &canal::Servidor, tx_desktop: &Sender<String>) -> Result<(),
 /// Sem rede, o supervisor ainda precisa dos relatos de desktop: é o que mantém
 /// a Fase 3 funcionando mesmo que ninguém consiga se conectar.
 fn escoar_sem_viewer(servidor: &canal::Servidor, tx_desktop: &Sender<String>) {
-    while escoar(servidor, tx_desktop).is_ok() {}
+    let mut dimensoes = None;
+    while escoar(servidor, tx_desktop, &mut dimensoes).is_ok() {}
 }
 
 /// Identidade da **máquina**, não do usuário.

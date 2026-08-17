@@ -112,9 +112,45 @@ cd "c:\Projeto Pcshare"
 
 ## O que vem a seguir
 
-### 1. Medir a arquitetura nova 🔴 é o próximo passo
+### 1. Medir a arquitetura nova 🟡 imagem e latência feitas; falta o UAC
 
-Nada da migração foi exercitado ainda. Três coisas, em ordem:
+**Imagem atravessa.** Supervisor, agente e viewer em loopback: `1360x768`,
+decodificada, gravada em BMP e conferida a olho — é a tela de verdade, texto
+legível. O caminho `captura → GPU → encode → cano → QUIC → Noise → decode`
+está inteiro de pé.
+
+**Latência: a divisão em três processos não custou nada mensurável.**
+
+| | tela → captura | captura → decodificação | total p50 |
+|---|---|---|---|
+| spike, processo único | 43,4 ms | 10,2 ms | **53,6 ms** |
+| arquitetura nova | 39,5 a 47,9 ms | 8,5 a 11,2 ms | **50,4 / 50,7 / 59,0 ms** |
+
+Três execuções de 40 amostras, p99 entre 66,7 e 68,2 ms. Medido com
+`pcshare-spike latencia-sessao`, criado para isto — o modo `latencia` antigo
+embute o host no próprio processo e mede a arquitetura que deixou de existir.
+
+> **Duas armadilhas custaram medições falsas aqui, ambas corrigidas.**
+>
+> A primeira: `kill %1` não funciona em shell não interativo. Sobraram
+> supervisores de execuções anteriores, cada um com seu agente capturando a
+> tela, e as medições seguintes saíram com três pipelines disputando o encoder.
+> O p99 foi de 66 ms para 520 ms **sem que nada no número denunciasse a
+> causa**. O script agora encerra por nome e confere quantos processos existem
+> antes de medir.
+>
+> A segunda: o viewer casa carimbo com quadro **por ordem de fila**, e todo
+> quadro que entra no decodificador sem sair desalinha a fila para sempre. A
+> decomposição derivou de 10 ms para 60 ms ao longo de cinco execuções, e as
+> primeiras passaram por medida boa. Há agora um teto na fila e uma conferência
+> antes de imprimir: se o trecho não couber dentro do total, o programa diz que
+> não sabe em vez de inventar.
+
+**Falta o teste que justifica a arquitetura inteira** — o prompt de UAC com
+viewer conectado — e a validação entre as duas máquinas. Ambos exigem alguém
+na máquina.
+
+#### Como rodar o que falta
 
 **a) Uma imagem qualquer, em modo console.** Num PowerShell **como
 administrador**:

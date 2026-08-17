@@ -451,9 +451,20 @@ fn atender_o_supervisor(
                     }
                     Mensagem::Capturar(ligado) => {
                         transmitindo.store(ligado, Ordering::Relaxed);
-                        // Um viewer que chega precisa de quadro-chave para ter
-                        // imagem; sem isto ele esperaria o próximo espontâneo.
                         if ligado {
+                            // Reanuncia as dimensões. O anúncio do nascimento
+                            // costuma ser bem anterior a existir viewer, e sem
+                            // ele o supervisor não monta o `Hello` — e descarta
+                            // todo o vídeo em silêncio.
+                            if !cliente.enviar(&Mensagem::Pronto {
+                                largura: w,
+                                altura: h,
+                            }) {
+                                log(&rotulo, "AVISO: falhei ao reanunciar as dimensões");
+                            }
+                            // Um viewer que chega precisa de quadro-chave para
+                            // ter imagem; sem isto esperaria o próximo
+                            // espontâneo.
                             pedido_de_keyframe.store(true, Ordering::Relaxed);
                         }
                         log(&rotulo, if ligado { "transmitindo" } else { "em espera" });
