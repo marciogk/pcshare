@@ -197,11 +197,39 @@ fn rodar(
             let _ = linha_do_tempo(vinculo, "captura-abriu");
             c
         }
-        Err(e) => {
-            log(rotulo, &format!("captura FALHOU: {e}"));
-            let _ = linha_do_tempo(vinculo, "captura-falhou");
-            return Err(e.into());
-        }
+        // **Nascer cego é condição normal, não falha.**
+        //
+        // O agente do `Winlogon` é criado antes do primeiro prompt de UAC,
+        // quando o desktop de entrada ainda é o do usuário — e duplicar o
+        // `Winlogon` dali dá acesso negado. Encerrar aqui é o que transformou
+        // o pré-lançamento num laço de seis processos por segundo em
+        // 17/08/2026.
+        //
+        // Ele segue vivo, monta o encoder com as dimensões que a saída de
+        // vídeo informa, e o laço de recuperação o liga quando o desktop
+        // ficar alcançável. É a mesma coisa que ele já sabia fazer ao ficar
+        // cego no meio da vida; só o nascimento era assimétrico.
+        Err(e) => match DesktopCapture::cega(gpu.clone(), 0) {
+            Ok(c) => {
+                log(
+                    rotulo,
+                    &format!(
+                        "captura indisponível ({e}); nascendo cego em {}x{} e aguardando o desktop",
+                        c.width(),
+                        c.height()
+                    ),
+                );
+                let _ = linha_do_tempo(vinculo, "nasceu-cego");
+                c
+            }
+            // Sem sequer conseguir descrever a saída de vídeo não há o que
+            // fazer: não é o desktop que está inacessível, é a GPU.
+            Err(e2) => {
+                log(rotulo, &format!("captura FALHOU: {e} / saída de vídeo: {e2}"));
+                let _ = linha_do_tempo(vinculo, "captura-falhou");
+                return Err(e2.into());
+            }
+        },
     };
     let (w, h) = (cap.width(), cap.height());
 

@@ -306,7 +306,7 @@ processo; se a latência subir muito, é ali.
 > errado para baixo**, que é o pior caso. Três medições deste projeto já saíram
 > plausíveis e falsas.
 
-### 2. Tirar o encoder do caminho crítico 🟡 tentado e revertido
+### 2. Tirar o encoder do caminho crítico 🟡 feito, falta medir
 
 A primeira janela de cegueira custa ~557 ms contra ~78 ms das seguintes, e
 362 ms disso é o encoder H.264 nascendo junto com o agente do `Winlogon`, que
@@ -323,16 +323,34 @@ duas razões que se somaram num laço de seis processos por segundo:
    espera nenhuma, enquanto as mortes dele incrementavam o contador que atrasa
    o agente de verdade.
 
-Para retomar, **nesta ordem**:
+**Refeito em 19/08, na ordem que faltava:**
 
-1. O agente precisa **sobreviver a nascer cego**, entrando no laço de
-   recuperação em vez de encerrar. Ele já sabe ficar cego no meio da vida; só
-   o nascimento é assimétrico.
-2. O encoder precisa ser montado sem depender da captura para saber as
-   dimensões — `IDXGIOutput::GetDesc` responde de qualquer desktop, sem
-   duplicação. Sem isso o agente pré-lançado ainda pagaria os 362 ms no
-   momento do UAC, e o aquecimento não serviria para nada.
-3. Só então pré-lançar, **com o recuo valendo para todos**.
+1. `DesktopCapture::cega` abre a captura sem duplicar, com as dimensões vindas
+   de `IDXGIOutput::GetDesc` — que responde de qualquer desktop, porque as
+   coordenadas do monitor são propriedade do adaptador, não da sessão de
+   captura. Dois testes cobrem isso, e um deles confere as dimensões contra as
+   da duplicação real, que é fonte independente.
+2. O agente **sobrevive a nascer cego**: entra no laço de recuperação em vez de
+   encerrar, e monta o encoder com as dimensões da saída de vídeo. Só falha de
+   verdade se nem descrever a saída for possível — aí não é o desktop que está
+   inacessível, é a GPU.
+3. O `Winlogon` é pré-lançado em modo serviço, **com o recuo valendo para
+   todos**.
+
+E o recuo passou a ser **por desktop, e por instante em vez de `sleep`**. Como
+era — global e dormindo — um agente morrendo em ciclo atrasava o agente do
+desktop ativo duas vezes: incrementava o contador dele e ainda bloqueava o laço
+inteiro. Com dois caminhos de lançamento existindo ao mesmo tempo, esse
+acoplamento deixaria de ser teórico.
+
+**Falta medir.** O caminho de pré-lançamento **não foi exercitado** — ele só
+existe em modo serviço, que exige elevação. O que verifiquei foi o modo
+console, onde nada regrediu, mais os testes de unidade da captura cega.
+
+Ao rodar, o sinal de sucesso é a **primeira janela deixar de ser a lenta**:
+todas as oito devem cair na faixa de 80 ms, em vez de uma de ~530 ms seguida
+de sete de ~87 ms. O sinal de fracasso é repetição de `agente lançado em
+'Winlogon'` no log — nesse caso pare o serviço, porque é o laço voltando.
 
 ### 3. Tela de bloqueio e Ctrl+Alt+Del 🟢
 

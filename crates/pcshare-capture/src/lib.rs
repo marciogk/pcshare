@@ -17,7 +17,8 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{
     DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_DESC, DXGI_OUTDUPL_FRAME_INFO,
-    DXGI_OUTDUPL_MOVE_RECT, IDXGIDevice, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+    DXGI_OUTDUPL_MOVE_RECT, DXGI_OUTPUT_DESC, IDXGIDevice, IDXGIOutput1, IDXGIOutputDuplication,
+    IDXGIResource,
 };
 use windows::core::Interface;
 
@@ -147,6 +148,61 @@ impl DesktopCapture {
                 dirty_buf: Vec::new(),
                 frame_held: false,
             })
+        }
+    }
+
+    /// Abre a captura **sem duplicar nada**, com as dimensões lidas da saída
+    /// de vídeo.
+    ///
+    /// Existe por causa do agente do `Winlogon`, que precisa nascer antes do
+    /// primeiro prompt de UAC. Nesse momento o desktop de entrada é o do
+    /// usuário, e duplicar o `Winlogon` dá acesso negado — o agente não teria
+    /// como abrir a captura nem, portanto, como saber a resolução da tela para
+    /// montar o encoder.
+    ///
+    /// `IDXGIOutput::GetDesc` responde de qualquer desktop, sem duplicação: as
+    /// coordenadas do monitor são propriedade do adaptador, não da sessão de
+    /// captura. É o que permite construir o encoder adiantado e deixar os
+    /// 362 ms que ele custa fora do caminho crítico.
+    ///
+    /// O objeto nasce com `is_active() == false`; [`Self::recover`] o liga
+    /// quando o desktop ficar alcançável.
+    pub fn cega(gpu: Arc<GpuContext>, output_index: u32) -> Result<Self, CaptureError> {
+        unsafe {
+            let device = gpu.device().clone();
+            let context = gpu.context().clone();
+            let saida = Self::describe_output(&device, output_index)?;
+
+            let mut desc = DXGI_OUTDUPL_DESC::default();
+            desc.ModeDesc.Width =
+                (saida.DesktopCoordinates.right - saida.DesktopCoordinates.left).unsigned_abs();
+            desc.ModeDesc.Height =
+                (saida.DesktopCoordinates.bottom - saida.DesktopCoordinates.top).unsigned_abs();
+
+            Ok(Self {
+                gpu,
+                device,
+                context,
+                duplication: None,
+                staging: None,
+                current: None,
+                desc,
+                output_index,
+                dirty_buf: Vec::new(),
+                frame_held: false,
+            })
+        }
+    }
+
+    unsafe fn describe_output(
+        device: &ID3D11Device,
+        output_index: u32,
+    ) -> Result<DXGI_OUTPUT_DESC, CaptureError> {
+        unsafe {
+            let dxgi_device: IDXGIDevice = device.cast()?;
+            let adapter = dxgi_device.GetAdapter()?;
+            let output = adapter.EnumOutputs(output_index)?;
+            Ok(output.GetDesc()?)
         }
     }
 
@@ -418,6 +474,54 @@ impl Drop for DesktopCapture {
             unsafe {
                 let _ = dup.ReleaseFrame();
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A captura cega tem de conhecer a tela **sem** duplicar.
+    ///
+    /// É a premissa do agente do `Winlogon` nascer antes do primeiro prompt de
+    /// UAC: se as dimensões dependessem da duplicação, ele não teria como
+    /// montar o encoder adiantado, e o aquecimento não serviria para nada.
+    #[test]
+    fn cega_sabe_a_resolucao_sem_duplicar() {
+        let Ok(gpu) = GpuContext::new() else {
+            eprintln!("sem GPU; teste ignorado");
+            return;
+        };
+        let Ok(cega) = DesktopCapture::cega(gpu.clone(), 0) else {
+            eprintln!("sem saída de vídeo; teste ignorado");
+            return;
+        };
+
+        assert!(!cega.is_active(), "cega não pode nascer duplicando");
+        assert!(cega.width() > 0 && cega.height() > 0, "resolução vazia");
+
+        // E tem de bater com a que a duplicação real reporta. Números
+        // plausíveis mas errados são o modo de falha que mais custou neste
+        // projeto — conferir contra a fonte independente é o que os pega.
+        if let Ok(viva) = DesktopCapture::with_gpu(gpu, 0) {
+            assert_eq!(
+                (cega.width(), cega.height()),
+                (viva.width(), viva.height()),
+                "dimensões da saída divergem das da duplicação"
+            );
+        }
+    }
+
+    /// Nascida cega, ela precisa aceitar ser ligada depois — é o que acontece
+    /// quando o Secure Desktop finalmente aparece.
+    #[test]
+    fn cega_pode_ser_ligada_depois() {
+        let Ok(gpu) = GpuContext::new() else { return };
+        let Ok(mut cega) = DesktopCapture::cega(gpu, 0) else { return };
+        assert!(!cega.is_active());
+        if cega.recover().is_ok() {
+            assert!(cega.is_active(), "recover teve sucesso mas não ligou");
         }
     }
 }

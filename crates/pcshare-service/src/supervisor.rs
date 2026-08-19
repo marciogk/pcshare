@@ -123,7 +123,17 @@ pub fn supervisionar(modo: Modo, parar: &AtomicBool) {
     // usuário de volta ao desktop normal.
     let mut alvo = "Default".to_string();
     let mut trocas = 0u64;
-    let mut mortes_rapidas = 0u32;
+    // Recuo **por desktop**, e por instante em vez de `sleep`.
+    //
+    // Global e com `sleep`, como era, um agente morrendo em ciclo atrasava o
+    // agente do desktop ativo duas vezes: incrementava o contador dele e ainda
+    // bloqueava o laço inteiro. Com o `Winlogon` sendo pré-lançado, os dois
+    // caminhos passam a existir ao mesmo tempo, e o acoplamento deixaria de
+    // ser teórico.
+    let mut mortes_rapidas: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
+    let mut proxima_tentativa: std::collections::HashMap<String, Instant> =
+        std::collections::HashMap::new();
 
     while !parar.load(Ordering::Relaxed) {
         // ---- 1. o que os agentes relataram pelo canal
@@ -154,9 +164,18 @@ pub fn supervisionar(modo: Modo, parar: &AtomicBool) {
                     }
                 }
                 if a.nasceu.elapsed() < VIDA_CURTA {
-                    mortes_rapidas += 1;
+                    let n = mortes_rapidas.entry(nome.clone()).or_default();
+                    *n += 1;
+                    let espera = (INTERVALO * (1u32 << (*n).min(6))).min(RECUO_MAXIMO);
+                    proxima_tentativa.insert(nome.clone(), Instant::now() + espera);
+                    log(&format!(
+                        "agente de '{nome}' viveu menos de {} ms; próxima tentativa em {:.1} s",
+                        VIDA_CURTA.as_millis(),
+                        espera.as_secs_f64()
+                    ));
                 } else {
-                    mortes_rapidas = 0;
+                    mortes_rapidas.remove(&nome);
+                    proxima_tentativa.remove(&nome);
                 }
                 log(&format!("agente de '{nome}' encerrou"));
                 // O Windows reaproveita PIDs; deixar o número autorizado abriria
@@ -166,31 +185,53 @@ pub fn supervisionar(modo: Modo, parar: &AtomicBool) {
             }
         }
 
-        // ---- 3. garante um agente vivo para o desktop ativo
+        // ---- 3. garante agentes vivos onde eles precisam estar
         //
-        // **Só para o desktop ativo.** Uma versão de 17/08/2026 mantinha
-        // também um agente do `Winlogon` quente, para tirar do caminho crítico
-        // os 362 ms que o encoder H.264 custa para nascer. A ideia continua
-        // certa, mas a implementação estava errada de duas formas, e as duas
-        // se somaram num laço de seis processos por segundo:
+        // Além do desktop ativo, mantém o `Winlogon` **quente**. Sem isso ele
+        // só nasce no primeiro prompt de UAC, e nascer ficou caro: o agente
+        // monta um encoder H.264 por hardware antes do primeiro quadro.
+        // Decompondo a primeira janela de cegueira, medida em 557 ms:
         //
-        // 1. O agente **encerra** quando a captura falha ao nascer, e um
-        //    agente do `Winlogon` criado enquanto o `Default` está à frente
-        //    não consegue duplicar coisa alguma. Ele morria no berço, sempre.
-        // 2. O recuo exponencial foi excluído do aquecimento "para não atrasar
-        //    o caminho crítico" — o que deixou justamente o agente que morre
-        //    em ciclo sem nenhuma espera, enquanto as mortes dele
-        //    incrementavam o contador que atrasa o agente de verdade.
+        //     perceber → lançar                12,2 ms
+        //     lançar → primeira instrução     150,7 ms
+        //     abrir a captura                  36,6 ms
+        //     captura → primeiro quadro       362,7 ms   ← o encoder
         //
-        // Reaquecer exige antes que o agente **sobreviva a nascer cego**, e
-        // que consiga montar o encoder sem depender da captura para saber as
-        // dimensões (`IDXGIOutput::GetDesc` responde de qualquer desktop).
-        // Sem isso, pré-lançar é trocar 480 ms de cegueira por um laço de
-        // criação de processos.
-        if !agentes.contains_key(&alvo) {
-            if mortes_rapidas > 0 {
-                let espera = INTERVALO * (1u32 << mortes_rapidas.min(6));
-                std::thread::sleep(espera.min(RECUO_MAXIMO));
+        // A segunda janela, com o agente já existindo, deu 77,8 ms. Nascer
+        // antes da hora é de graça: acontece fora do caminho crítico.
+        //
+        // **Isto só funciona porque o agente sobrevive a nascer cego.** Uma
+        // primeira tentativa, em 17/08/2026, foi revertida por virar um laço
+        // de seis processos por segundo — o agente encerrava quando a captura
+        // falhava, e um agente do `Winlogon` criado com o `Default` à frente
+        // nunca consegue duplicar. Ele agora nasce cego, monta o encoder com
+        // as dimensões que a saída de vídeo informa, e liga quando o desktop
+        // aparece.
+        //
+        // Só em modo serviço: alcançar o `Winlogon` exige token de SYSTEM, e
+        // em console o processo nem chega a ser criado.
+        let mut a_garantir = vec![alvo.clone()];
+        if modo == Modo::Servico && alvo != "Winlogon" {
+            a_garantir.push("Winlogon".to_string());
+        }
+
+        for alvo in a_garantir {
+            if agentes.contains_key(&alvo) {
+                continue;
+            }
+            // **O recuo vale para todos**, incluindo o aquecimento. Aquela
+            // primeira tentativa o isentou "para não atrasar o caminho
+            // crítico", e o efeito foi o inverso: o agente que morria em ciclo
+            // ficou sem espera nenhuma.
+            //
+            // Esperar por instante, e não dormindo, é o que impede um agente
+            // em recuo de segurar o laço — e portanto de atrasar o agente do
+            // desktop que está na frente.
+            if proxima_tentativa
+                .get(&alvo)
+                .is_some_and(|t| Instant::now() < *t)
+            {
+                continue;
             }
             let desejado = desktop_por_nome(&alvo);
             let percebido = Instant::now();
