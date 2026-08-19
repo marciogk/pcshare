@@ -450,7 +450,26 @@ fn atender_o_supervisor(
                         pedido_de_keyframe.store(true, Ordering::Relaxed);
                     }
                     Mensagem::Capturar(ligado) => {
-                        transmitindo.store(ligado, Ordering::Relaxed);
+                        // Só age na **transição**, e a razão é concreta: o
+                        // supervisor manda `Capturar(true)` ao receber um
+                        // `Pronto`, e reanunciar `Pronto` a cada `Capturar`
+                        // fecha um laço de realimentação entre os dois
+                        // processos.
+                        //
+                        // Medido em 18/08/2026, antes desta guarda: 176.187
+                        // ordens de transmitir numa sessão de dois minutos, e
+                        // um pedido de keyframe em cada volta. Como keyframe é
+                        // ordens de grandeza maior que um quadro normal, o link
+                        // saturou e a contrapressão passou a descartar mais da
+                        // metade dos quadros — 4094 descartados contra 3989
+                        // repassados.
+                        //
+                        // Comparar antes de agir é o que torna a mensagem
+                        // idempotente, e uma mensagem idempotente é a única
+                        // que pode ser reenviada sem consequência.
+                        if transmitindo.swap(ligado, Ordering::Relaxed) == ligado {
+                            continue;
+                        }
                         if ligado {
                             // Reanuncia as dimensões. O anúncio do nascimento
                             // costuma ser bem anterior a existir viewer, e sem

@@ -237,6 +237,8 @@ fn servir<T: Transport>(
     let mut descartados = 0u64;
     let mut enviados = 0u64;
     let mut entrada_recebida = 0u64;
+    // Agentes que já foram mandados transmitir nesta sessão.
+    let mut transmitindo: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut proximo_relato = Instant::now() + Duration::from_secs(5);
 
     loop {
@@ -293,8 +295,21 @@ fn servir<T: Transport>(
                     //
                     // O `Pronto` é o momento certo: é a primeira coisa que um
                     // agente diz depois de abrir a captura.
-                    let _ = servidor.enviar(id, &Mensagem::Capturar(true));
-                    let _ = servidor.enviar(id, &Mensagem::PedirKeyframe);
+                    //
+                    // **Uma vez por agente, por sessão.** O agente reanuncia
+                    // `Pronto` ao começar a transmitir, então responder a todo
+                    // `Pronto` fecha um laço entre os dois processos: 176.187
+                    // ordens de transmitir em dois minutos, cada uma pedindo um
+                    // keyframe, e o link saturado descartando mais da metade
+                    // dos quadros.
+                    //
+                    // O agente também passou a ignorar `Capturar` que não muda
+                    // nada. Os dois lados guardam a mesma porta de propósito:
+                    // um agente de versão anterior reabriria o laço sozinho.
+                    if transmitindo.insert(id) {
+                        let _ = servidor.enviar(id, &Mensagem::Capturar(true));
+                        let _ = servidor.enviar(id, &Mensagem::PedirKeyframe);
+                    }
 
                     if !anunciou {
                         let hello = Message::Hello {
