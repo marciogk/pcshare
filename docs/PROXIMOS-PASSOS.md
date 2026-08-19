@@ -306,7 +306,7 @@ processo; se a latência subir muito, é ali.
 > errado para baixo**, que é o pior caso. Três medições deste projeto já saíram
 > plausíveis e falsas.
 
-### 2. Tirar o encoder do caminho crítico 🟡 feito, falta medir
+### 2. Tirar o encoder do caminho crítico ✅ 19/08/2026
 
 A primeira janela de cegueira custa ~557 ms contra ~78 ms das seguintes, e
 362 ms disso é o encoder H.264 nascendo junto com o agente do `Winlogon`, que
@@ -343,14 +343,32 @@ desktop ativo duas vezes: incrementava o contador dele e ainda bloqueava o laço
 inteiro. Com dois caminhos de lançamento existindo ao mesmo tempo, esse
 acoplamento deixaria de ser teórico.
 
-**Falta medir.** O caminho de pré-lançamento **não foi exercitado** — ele só
-existe em modo serviço, que exige elevação. O que verifiquei foi o modo
-console, onde nada regrediu, mais os testes de unidade da captura cega.
+**Medido, com nove prompts de UAC:**
 
-Ao rodar, o sinal de sucesso é a **primeira janela deixar de ser a lenta**:
-todas as oito devem cair na faixa de 80 ms, em vez de uma de ~530 ms seguida
-de sete de ~87 ms. O sinal de fracasso é repetição de `agente lançado em
-'Winlogon'` no log — nesse caso pare o serviço, porque é o laço voltando.
+| | antes | depois |
+|---|---|---|
+| **máximo** | 530,4 ms | **99,2 ms** |
+| mediana | 87,2 ms | 89,1 ms |
+| janelas | 8 | 18 |
+| lançamentos de `Winlogon` | 1 por prompt | **1 no total** |
+| descartes | 0 | 0 (em 2259 quadros) |
+
+**O ganho está no máximo, não na mediana** — e a mediana quase não se mexeu
+porque ela nunca foi o problema. O custo estava concentrado no primeiro
+prompt, que é justamente o que a pessoa encontra ao pedir socorro pela
+primeira vez. As 18 janelas agora ficam entre 57,4 e 99,2 ms, sem nada
+destoando.
+
+O log confirma o mecanismo:
+
+```
+[Winlogon] captura indisponível (Acesso negado 0x80070005);
+           nascendo cego em 1360x768 e aguardando o desktop
+[Winlogon] encoder [Intel® Quick Sync Video H.264 Encoder MFT]
+```
+
+Negado, vivo, e com o encoder montado dez milissegundos depois da subida do
+serviço — fora do caminho crítico, que era o objetivo inteiro.
 
 ### 3. Tela de bloqueio e Ctrl+Alt+Del 🟢
 
