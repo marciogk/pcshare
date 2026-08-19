@@ -1,6 +1,6 @@
 # Próximos passos
 
-Atualizado em 17/08/2026, ao encerrar.
+Atualizado em 19/08/2026.
 
 ---
 
@@ -182,17 +182,47 @@ Cegueira, oito janelas: mediana **92,6 ms**, contra os 91 ms de 10/08. A
 migração não mexeu no regime permanente. A primeira janela deu 584,5 ms — o
 agente do `Winlogon` nascendo com o encoder, que é o item 2.
 
-> **Mas o viewer não viu o Secure Desktop.** O agente do `Winlogon` terminou a
-> sessão com `0 quadros`: ele **capturou e nunca transmitiu**. `Capturar(true)`
-> era difundido uma única vez, quando o viewer chega, e quem nasce depois
-> nascia em espera.
->
-> Ou seja, os 92 ms mediam **captura**, não entrega. Na tela do notebook o
-> congelamento durou o prompt inteiro, um a dois segundos.
->
-> Corrigido: o supervisor agora manda `Capturar(true)` e `PedirKeyframe` ao
-> receber o `Pronto` de qualquer agente durante uma sessão. **Falta remedir com
-> isso valendo** — e é a próxima coisa a fazer.
+### Fase 3 fechada ✅ 19/08/2026
+
+O prompt de UAC **aparece na tela do notebook**, e os números finais são:
+
+| | 18/08 | 19/08 |
+|---|---|---|
+| ordens de transmitir | 176.187 / 88.719 | **1 / 1** |
+| quadros descartados | 4.094 | **0** |
+| cegueira, mediana | 92,6 ms | **87,2 ms** |
+| sessão sobrevive ao UAC | ✅ | ✅ |
+
+Oito janelas, todas entre 75,1 e 99,7 ms fora a primeira. A dispersão estreita
+é o que dá confiança de que não é média de coisas diferentes.
+
+Agora os 87,2 ms significam **entrega**, e não apenas captura — que é a
+diferença entre "o agente conseguiu capturar" e "a pessoa do outro lado viu".
+
+#### Dois defeitos no caminho, ambos do mesmo tipo
+
+Em 18/08 o agente do `Winlogon` terminou a sessão com `0 quadros`: capturou o
+tempo todo e nunca transmitiu, porque `Capturar(true)` era difundido uma única
+vez, quando o viewer chega, e ele nasce só no primeiro prompt. **Os 92 ms
+mediam captura; na tela do notebook o congelamento durou o prompt inteiro.**
+
+A correção — responder ao `Pronto` com `Capturar(true)` — fechou um laço de
+realimentação, porque o agente reanuncia `Pronto` ao começar a transmitir.
+Resultado: 176.187 ordens em dois minutos, cada uma pedindo um keyframe, e o
+link saturado descartando mais da metade dos quadros. **A imagem chegou mesmo
+assim**, que é justamente o que torna esse tipo de defeito caro: não aparece
+como falha, só como desperdício.
+
+A causa raiz é a mesma nos dois: `Capturar` não era idempotente. Uma mensagem
+que provoca resposta a cada recebimento não pode ser reenviada. Fechado dos
+dois lados — o agente compara antes de agir, o supervisor liga cada agente uma
+vez por sessão.
+
+> **O log do agente não é rotacionado nem carimba a hora.** Contar
+> `transmitindo` nele deu 397.121 depois da correção, o que parecia piora e era
+> só acúmulo de execuções anteriores. Para contar a instância atual:
+> `tail -n +$(grep -n "=== início ===" arquivo | tail -1 | cut -d: -f1)`.
+> Vale arrumar isso antes da próxima medição que dependa desse log.
 
 > **O viewer do notebook não precisa ser atualizado.** `proto.rs` não muda
 > desde 29/07 e `quic`/`secure` desde 30/07; o binário lá é posterior. Tudo o
