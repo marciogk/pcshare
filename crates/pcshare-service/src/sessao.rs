@@ -277,6 +277,25 @@ fn servir<T: Transport>(
                 }
                 Mensagem::Pronto { largura, altura } => {
                     *dimensoes = Some((largura, altura));
+
+                    // Agente novo em sessão que já corre: manda transmitir.
+                    //
+                    // `Capturar(true)` é difundido uma vez, quando o viewer
+                    // chega. Quem **nasce depois** não o recebe, e nasce em
+                    // espera — exatamente o caso do agente do `Winlogon`, que
+                    // só é criado no primeiro prompt de UAC.
+                    //
+                    // Medido em 18/08/2026: quatro prompts, a sessão intacta,
+                    // e o agente do `Winlogon` com `0 quadros` a vida inteira.
+                    // A cegueira de 92 ms era real como *captura*, mas o viewer
+                    // ficou com a tela congelada o prompt inteiro, porque
+                    // ninguém estava mandando os quadros do Secure Desktop.
+                    //
+                    // O `Pronto` é o momento certo: é a primeira coisa que um
+                    // agente diz depois de abrir a captura.
+                    let _ = servidor.enviar(id, &Mensagem::Capturar(true));
+                    let _ = servidor.enviar(id, &Mensagem::PedirKeyframe);
+
                     if !anunciou {
                         let hello = Message::Hello {
                             width: largura,
@@ -286,10 +305,6 @@ fn servir<T: Transport>(
                         t.send(hello.channel(), &hello.encode())?;
                         anunciou = true;
                         log(&format!("sessão: anunciada tela {largura}x{altura}"));
-                        // O agente pode já estar codificando há bastante tempo;
-                        // sem isto o viewer esperaria o próximo keyframe
-                        // espontâneo para ter imagem.
-                        let _ = servidor.enviar(id, &Mensagem::PedirKeyframe);
                     }
                     // Trocas de resolução no meio da sessão ficam para depois:
                     // exigiriam recriar o decodificador no viewer, que hoje

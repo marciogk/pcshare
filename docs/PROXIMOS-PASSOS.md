@@ -159,10 +159,40 @@ Zero descartes, e o `somente_ver=1` recebendo a entrada do viewer sem injetar.
 O contador de quadros ficando parado por três relatórios e depois disparando é
 a supressão de tela ociosa trabalhando.
 
-**Falta o teste que justifica a arquitetura inteira**: aquele `0 trocas de
-desktop` é o que ainda não foi exercitado. Nenhum prompt de UAC aconteceu
-enquanto o viewer estava conectado — e é essa a pergunta em aberto: a sessão
-sobrevive ao Secure Desktop?
+### A sessão sobrevive ao Secure Desktop ✅ 18/08/2026
+
+**Confirmado.** Quatro prompts de UAC com o notebook conectado, e nenhuma
+linha de `sessão encerrada` entre eles:
+
+```
+[19:18:46] --- sessão 1 iniciada ---
+[19:19:27] agente relatou: desktop de entrada é 'Winlogon'
+[19:19:37] agente relatou: desktop de entrada é 'Winlogon'
+[19:19:50] agente relatou: desktop de entrada é 'Winlogon'
+[19:20:02] agente relatou: desktop de entrada é 'Winlogon'
+[19:20:46] sessão: 707 quadros repassados, 0 descartados, 2 agentes no canal
+[19:20:50] parada solicitada pelo Windows
+```
+
+A sessão durou os dois minutos inteiros, atravessando quatro trocas de
+desktop, com **zero descartes**. É a justificativa da arquitetura inteira,
+verificada.
+
+Cegueira, oito janelas: mediana **92,6 ms**, contra os 91 ms de 10/08. A
+migração não mexeu no regime permanente. A primeira janela deu 584,5 ms — o
+agente do `Winlogon` nascendo com o encoder, que é o item 2.
+
+> **Mas o viewer não viu o Secure Desktop.** O agente do `Winlogon` terminou a
+> sessão com `0 quadros`: ele **capturou e nunca transmitiu**. `Capturar(true)`
+> era difundido uma única vez, quando o viewer chega, e quem nasce depois
+> nascia em espera.
+>
+> Ou seja, os 92 ms mediam **captura**, não entrega. Na tela do notebook o
+> congelamento durou o prompt inteiro, um a dois segundos.
+>
+> Corrigido: o supervisor agora manda `Capturar(true)` e `PedirKeyframe` ao
+> receber o `Pronto` de qualquer agente durante uma sessão. **Falta remedir com
+> isso valendo** — e é a próxima coisa a fazer.
 
 > **O viewer do notebook não precisa ser atualizado.** `proto.rs` não muda
 > desde 29/07 e `quic`/`secure` desde 30/07; o binário lá é posterior. Tudo o
