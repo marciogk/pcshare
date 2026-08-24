@@ -405,9 +405,47 @@ Corrigido: o log do agente agora **rotaciona** na subida, **carimba a hora**, e
 o batimento passou de 2 s para 60 s. As transições que importam continuam
 sendo registradas na hora.
 
-**Falta:** o teste de bloqueio de verdade — `Win+L` com o viewer conectado,
-episódio de vários minutos — e a injeção de `Ctrl+Alt+Del`, que é
-funcionalidade nova.
+#### O teste de bloqueio: a premissa estava errada 🔴 19/08/2026
+
+**Um bloqueio não é um UAC longo. É outro mecanismo, e hoje o viewer não
+enxerga nada durante ele.**
+
+Cinco minutos de tela bloqueada, com o notebook conectado. O que os dados
+mostram:
+
+| observação | valor |
+|---|---|
+| episódios de `Winlogon` | **0,3 s** e **4,35 s** — só os instantes de bloquear e digitar a senha |
+| agente do `Default` | `capturando` por **282 s seguidos**, sem perder a duplicação |
+| quadros repassados no período | 639 → 649 em cinco minutos, ou seja, tela estática |
+| agente do `Winlogon` | nunca conseguiu duplicar durante o bloqueio |
+| **o que apareceu no notebook** | **preto** |
+
+E não é economia de energia: `powercfg` mostra `VIDEOIDLE = 0x00000000` na
+tomada, o vídeo nunca desliga.
+
+Ou seja: durante o bloqueio a duplicação do `Default` **continua funcionando** —
+não dá `AccessLost` como num prompt de UAC — mas entrega preto. E o agente do
+`Winlogon`, que seria o candidato natural a capturar a tela de bloqueio, é
+recusado o tempo todo.
+
+**Consequência para o produto:** um operador que se conecta a uma máquina
+bloqueada não vê nada e não tem como ajudar. É a situação mais comum num
+atendimento de suporte — a pessoa sai, bloqueia, e pede ajuda remota. Os
+concorrentes mostram a tela de bloqueio e permitem destravar.
+
+**Por que a premissa enganou:** o item dizia "mesma mecânica, episódios mais
+longos", e os 121 ms de cegueira medidos parecem confirmar. Parecem, porque a
+cegueira medida é só a das duas transições curtas — o instrumento mede troca de
+desktop, e durante o bloqueio **não há troca de desktop para medir**. O número
+estava certo sobre a coisa errada, de novo.
+
+**Falta investigar** por que a duplicação entrega preto e por que o `Winlogon`
+é recusado durante o bloqueio, quando é aceito durante o UAC. Só depois disso
+faz sentido decidir o que construir.
+
+**Falta também** a injeção de `Ctrl+Alt+Del`, que é funcionalidade nova e está
+ligada a isto: destravar remotamente depende das duas coisas.
 
 > `SendInput` **não gera** Ctrl+Alt+Del: o Windows reserva a sequência de
 > propósito. O caminho é `SendSAS` da `sas.dll`, com a política
