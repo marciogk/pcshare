@@ -110,6 +110,19 @@ fn caminho_do_log(rotulo: &str) -> PathBuf {
         .join(format!("agente-{seguro}.log"))
 }
 
+/// Luminância média, amostrando de 64 em 64 pixels.
+///
+/// Não precisa ser exata: a pergunta é "isto é preto?", não "qual o brilho".
+fn luminancia(bgra: &[u8]) -> f64 {
+    let mut soma = 0f64;
+    let mut n = 0u32;
+    for p in bgra.chunks_exact(4).step_by(64) {
+        soma += 0.114 * p[0] as f64 + 0.587 * p[1] as f64 + 0.299 * p[2] as f64;
+        n += 1;
+    }
+    if n == 0 { -1.0 } else { soma / n as f64 }
+}
+
 /// Move o log anterior para `-anterior.log` e começa um vazio.
 ///
 /// Mesma política do supervisor, pelo mesmo motivo: ler o topo de um arquivo é
@@ -328,6 +341,22 @@ fn rodar(
     let mut capturando = false;
     // Uma linha de motivo por episódio de cegueira, e não por tentativa.
     let mut recusa_registrada = false;
+    // Mede o **primeiro quadro depois de voltar a enxergar**.
+    //
+    // Existe por causa de um preto que apareceu no viewer durante um bloqueio
+    // de tela em 19/08/2026, com a captura provadamente entregando imagem
+    // (luminância 110,3, medida com `pcshare-capture --bin bloqueio`). Se a
+    // captura está certa e o viewer vê preto, o problema está entre os dois —
+    // e o caminho GPU direto, que o diagnóstico não exercita, é o suspeito.
+    //
+    // Duas medidas resolvem a dúvida sem opinião: a luminância do que foi
+    // capturado, e o tamanho do primeiro pacote codificado. Imagem real com
+    // pacote minúsculo significa que o encode perdeu o conteúdo.
+    //
+    // Uma vez por episódio, fora do caminho quente: o readback custa alguns
+    // milissegundos e não pode entrar no laço de 60 quadros por segundo.
+    let mut medir_este = false;
+    let mut aguardando_pacote = false;
     let mut ultimo_relatado = codigo_do_vinculo;
     // Batimento raro de propósito. A cada dois segundos, que era o ritmo do
     // desenvolvimento da Fase 3, dá 43 mil linhas por dia **por agente**. As
@@ -433,6 +462,9 @@ fn rodar(
         if !capturando {
             capturando = true;
             recusa_registrada = false;
+            // Uma amostra por episódio: o que a captura entrega, e o que o
+            // encoder produz a partir dela. Ver `medir_este`.
+            medir_este = true;
             let _ = linha_do_tempo(vinculo, "capturando");
         }
 
@@ -485,7 +517,31 @@ fn rodar(
             enc.submit(&nv12)?;
         }
 
+        if medir_este {
+            medir_este = false;
+            let luz = match cap.copy_bgra(&mut bgra) {
+                Ok(true) => luminancia(&bgra),
+                _ => -1.0,
+            };
+            log(
+                rotulo,
+                &format!("primeiro quadro após cegueira: luminância {luz:.1}"),
+            );
+            aguardando_pacote = true;
+        }
+
         for p in enc.take_packets() {
+            if aguardando_pacote {
+                aguardando_pacote = false;
+                log(
+                    rotulo,
+                    &format!(
+                        "primeiro pacote após cegueira: {} bytes{}",
+                        p.data.len(),
+                        if p.is_keyframe { " (chave)" } else { "" }
+                    ),
+                );
+            }
             let m = Mensagem::Quadro {
                 seq,
                 tempo_us: capturado_us,
