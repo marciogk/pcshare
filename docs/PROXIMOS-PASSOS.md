@@ -370,9 +370,52 @@ O log confirma o mecanismo:
 Negado, vivo, e com o encoder montado dez milissegundos depois da subida do
 serviço — fora do caminho crítico, que era o objetivo inteiro.
 
-### 3. Tela de bloqueio e Ctrl+Alt+Del 🟢
+### 3. Tela de bloqueio e Ctrl+Alt+Del 🟡 medido; falta o teste e o CAD
 
-Mesma mecânica já provada, episódios mais longos. Baixo risco.
+A premissa — "mesma mecânica, episódios mais longos" — **se sustenta para a
+CPU, e não se sustentava para o disco.**
+
+**O laço de recuperação não é problema.** O agente cego tenta `recover()` a
+cada 50 ms, o que numa hora de tela bloqueada dá 72 mil tentativas. Medido com
+`pcshare-capture --bin custo-cego`:
+
+| caminho | p50 | por hora cego |
+|---|---|---|
+| negado (o do agente cego) | **134 us** | 9,7 s de CPU — **0,27% de um núcleo** |
+| bem-sucedido | 455 a 594 us | 33 a 43 s — 0,91 a 1,19% |
+
+> **Medir o caminho errado quase mudou a decisão.** A primeira versão do
+> instrumento media `recover()` onde ele **funciona**, e dava mais de 1% de um
+> núcleo — o bastante para eu mexer no recuo. O caminho que interessa é o que
+> é **negado**, e ele custa quatro vezes menos. O instrumento agora se isola
+> num desktop inalcançável (`CreateDesktopW` + `SetThreadDesktop`), reproduzindo
+> a negação sem serviço nem elevação, e **avisa** quando nenhuma tentativa
+> falhou.
+
+Isso vale também para o `Winlogon` pré-aquecido, que fica cego **o tempo todo**
+e não só durante bloqueios: 0,27% de um núcleo é o preço permanente do
+aquecimento.
+
+**O custo de episódio longo era o log.** Os logs de agente chegaram a **8,8 MB
+em duas semanas** de desenvolvimento, e em regime seriam 86 mil linhas por dia
+— uma linha a cada dois segundos, vezes dois agentes. Num produto que roda no
+computador de outra pessoa, encher o disco é defeito.
+
+Corrigido: o log do agente agora **rotaciona** na subida, **carimba a hora**, e
+o batimento passou de 2 s para 60 s. As transições que importam continuam
+sendo registradas na hora.
+
+**Falta:** o teste de bloqueio de verdade — `Win+L` com o viewer conectado,
+episódio de vários minutos — e a injeção de `Ctrl+Alt+Del`, que é
+funcionalidade nova.
+
+> `SendInput` **não gera** Ctrl+Alt+Del: o Windows reserva a sequência de
+> propósito. O caminho é `SendSAS` da `sas.dll`, com a política
+> `SoftwareSASGeneration` habilitada em
+> `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System`
+> (`2` = serviços, `3` = serviços e apps de acessibilidade). É mudança na
+> postura de segurança da máquina, que o instalador do produto teria de fazer
+> — decisão a tomar de olhos abertos, não de passagem.
 
 ### 4. Reduzir os 90 ms restantes 🟡 retorno pequeno
 

@@ -65,7 +65,10 @@ fn fps() -> u32 {
 /// — foi exatamente o que aconteceu: o supervisor relançava o agente a cada
 /// 100 ms sem perceber que ele nascia e morria.
 fn log(rotulo: &str, msg: &str) {
-    let linha = format!("[{rotulo}] {msg}\n");
+    let linha = format!(
+        "[{}] [{rotulo}] {msg}\n",
+        pcshare_capture::linha_do_tempo::hora_local()
+    );
     // Ignora falha de propósito: sem console não há para onde escrever, e
     // isso não é motivo para derrubar o agente.
     let _ = std::io::stdout().write_all(linha.as_bytes());
@@ -107,6 +110,26 @@ fn caminho_do_log(rotulo: &str) -> PathBuf {
         .join(format!("agente-{seguro}.log"))
 }
 
+/// Move o log anterior para `-anterior.log` e começa um vazio.
+///
+/// Mesma política do supervisor, pelo mesmo motivo: ler o topo de um arquivo é
+/// o reflexo natural de qualquer pessoa, e um arquivo que acumula execuções
+/// premia esse reflexo com informação de semanas atrás.
+fn rotacionar_log(rotulo: &str) {
+    let atual = caminho_do_log(rotulo);
+    if !atual.exists() {
+        return;
+    }
+    let Some(nome) = atual.file_stem().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let anterior = atual.with_file_name(format!("{nome}-anterior.log"));
+    // Falhar aqui não impede nada: no pior caso o arquivo continua crescendo,
+    // que é como era antes.
+    let _ = std::fs::remove_file(&anterior);
+    let _ = std::fs::rename(&atual, &anterior);
+}
+
 fn main() {
     // Primeiríssima instrução: este carimbo mede o custo de criação do
     // processo, e qualquer coisa antes dele o contamina. A versão anterior o
@@ -146,6 +169,13 @@ fn main() {
     };
 
     let (sessao, console) = desktop::sessions();
+
+    // Guarda o log da execução anterior e começa um limpo.
+    //
+    // Sem isto o arquivo cresce sem fim, e os desta máquina chegaram a 8,8 MB
+    // em duas semanas. O produto roda no computador de outra pessoa, onde
+    // encher o disco é defeito, não detalhe.
+    rotacionar_log(&rotulo);
 
     log(&rotulo, "=== início ===");
     if !instrumento_ok {
@@ -297,7 +327,13 @@ fn rodar(
     let mut ultimo_quadro_us: Option<u128> = None;
     let mut capturando = false;
     let mut ultimo_relatado = codigo_do_vinculo;
-    let mut proximo_relato = Instant::now() + Duration::from_secs(2);
+    // Batimento raro de propósito. A cada dois segundos, que era o ritmo do
+    // desenvolvimento da Fase 3, dá 43 mil linhas por dia **por agente**. As
+    // transições que importam — trocar de desktop, começar a transmitir, ficar
+    // cego — são registradas na hora; ao batimento resta só provar que o
+    // processo continua vivo.
+    const BATIMENTO: Duration = Duration::from_secs(60);
+    let mut proximo_relato = Instant::now() + BATIMENTO;
 
     let periodo = Duration::from_micros(1_000_000 / fps() as u64);
     let mut ultimo_encode = Instant::now() - periodo;
@@ -344,7 +380,7 @@ fn rodar(
                 rotulo,
                 &format!("vivo em '{}' | {quadros} quadros | {perdas} perdas", agora.label()),
             );
-            proximo_relato += Duration::from_secs(2);
+            proximo_relato += BATIMENTO;
         }
 
         if pedido_de_keyframe.swap(false, Ordering::Relaxed) {

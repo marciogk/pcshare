@@ -62,3 +62,18 @@ pub fn pasta() -> PathBuf {
         .join("PCShare")
         .join("linha-do-tempo")
 }
+
+/// `HH:MM:SS.mmm` em horário local.
+///
+/// Existe porque o log do agente não carimbava a hora, e contar linhas nele
+/// misturava execuções — em 19/08/2026 isso quase produziu a conclusão de que
+/// uma correção tinha falhado, quando o que se via era acúmulo de dias
+/// anteriores. Um registro sem hora é um registro que mente por omissão.
+pub fn hora_local() -> String {
+    use windows::Win32::System::SystemInformation::GetLocalTime;
+    let s = unsafe { GetLocalTime() };
+    format!(
+        "{:02}:{:02}:{:02}.{:03}",
+        s.wHour, s.wMinute, s.wSecond, s.wMilliseconds
+    )
+}
