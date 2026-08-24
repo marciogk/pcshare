@@ -326,6 +326,8 @@ fn rodar(
     let mut perdas = 0u32;
     let mut ultimo_quadro_us: Option<u128> = None;
     let mut capturando = false;
+    // Uma linha de motivo por episódio de cegueira, e não por tentativa.
+    let mut recusa_registrada = false;
     let mut ultimo_relatado = codigo_do_vinculo;
     // Batimento raro de propósito. A cada dois segundos, que era o ritmo do
     // desenvolvimento da Fase 3, dá 43 mil linhas por dia **por agente**. As
@@ -401,7 +403,24 @@ fn rodar(
                         let _ = linha_do_tempo(vinculo, &format!("cego-desde {us}"));
                     }
                 }
-                let _ = cap.recover();
+                // Registra **por que** a captura foi recusada, uma vez por
+                // episódio de cegueira.
+                //
+                // Antes isto era `let _ = cap.recover()`, e o motivo se
+                // perdia. Quando o teste de bloqueio mostrou que o agente do
+                // `Winlogon` nunca consegue duplicar durante uma tela
+                // bloqueada, não havia como saber se a recusa era a mesma do
+                // prompt de UAC ou outra coisa — e a diferença muda o que se
+                // deve construir.
+                //
+                // Uma vez por episódio, não por tentativa: são 20 por segundo,
+                // e um log por tentativa afogaria o arquivo.
+                if let Err(motivo) = cap.recover()
+                    && !recusa_registrada
+                {
+                    recusa_registrada = true;
+                    log(rotulo, &format!("captura recusada: {motivo}"));
+                }
                 std::thread::sleep(BACKOFF_CEGO);
                 continue;
             }
@@ -413,6 +432,7 @@ fn rodar(
         // cegueira costuma ser um agente que retoma, não um que nasce.
         if !capturando {
             capturando = true;
+            recusa_registrada = false;
             let _ = linha_do_tempo(vinculo, "capturando");
         }
 

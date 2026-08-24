@@ -424,10 +424,31 @@ mostram:
 E não é economia de energia: `powercfg` mostra `VIDEOIDLE = 0x00000000` na
 tomada, o vídeo nunca desliga.
 
-Ou seja: durante o bloqueio a duplicação do `Default` **continua funcionando** —
-não dá `AccessLost` como num prompt de UAC — mas entrega preto. E o agente do
-`Winlogon`, que seria o candidato natural a capturar a tela de bloqueio, é
-recusado o tempo todo.
+> ### ⚠️ Esta conclusão estava errada, e foi corrigida em 19/08 mais tarde
+>
+> Escrevi que "a duplicação entrega preto". **É falso.** O preto foi inferido
+> da observação no notebook somada ao fato de o `Default` estar capturando —
+> correlação chamada de mecanismo, sem ninguém ter olhado o conteúdo.
+>
+> Medindo a luminância do que a captura entrega (`--bin bloqueio`), durante o
+> bloqueio inteiro ela vale **110,3**, estática: é a tela de bloqueio, e não
+> preto. **Zero quadros pretos em 368 amostras.**
+>
+> | momento | o que acontece |
+> |---|---|
+> | bloqueio | `0x80070005` por **0,4 s** |
+> | tela bloqueada | **capturando, luminância 110,3** |
+> | senha | `0x80070005` por **1,75 s** |
+> | desbloqueado | luminância sobe a 177 e normaliza |
+>
+> O agente do `Winlogon` é recusado porque o desktop de entrada **volta a ser
+> `Default`** logo após bloquear. Quem captura a tela de bloqueio é o agente do
+> `Default` — o que, no fim, é a arquitetura funcionando.
+>
+> **A camada de captura está certa. O preto está depois dela**, e continua sem
+> explicação. Suspeito principal: o diagnóstico usa leitura pela CPU
+> (`copy_bgra`) e o agente usa o **caminho GPU direto**; se o caminho GPU
+> emitir preto após um `recover()`, explica o que se viu.
 
 **Consequência para o produto:** um operador que se conecta a uma máquina
 bloqueada não vê nada e não tem como ajudar. É a situação mais comum num
