@@ -445,10 +445,37 @@ tomada, o vídeo nunca desliga.
 > `Default`** logo após bloquear. Quem captura a tela de bloqueio é o agente do
 > `Default` — o que, no fim, é a arquitetura funcionando.
 >
-> **A camada de captura está certa. O preto está depois dela**, e continua sem
-> explicação. Suspeito principal: o diagnóstico usa leitura pela CPU
-> (`copy_bgra`) e o agente usa o **caminho GPU direto**; se o caminho GPU
-> emitir preto após um `recover()`, explica o que se viu.
+> **A camada de captura está certa.**
+
+#### Encerrado: não havia defeito ✅ 08/09/2026
+
+Refeito o teste com a máquina remota conectada por Tailscale, **a tela de
+bloqueio apareceu normalmente do outro lado**. O preto não se reproduziu.
+
+Três medições independentes apontam o mesmo:
+
+| evidência | resultado |
+|---|---|
+| luminância durante o bloqueio (`--bin bloqueio`) | 110,3 constante, zero quadros pretos em 368 amostras |
+| linha do tempo durante o bloqueio | **nenhum** `cego-desde` — o agente não fica cego |
+| tela da máquina remota | a tela de bloqueio, como esperado |
+
+O que se vê no log é a supressão de tela ociosa funcionando: os quadros travam
+em 87 → 88 durante os trinta e cinco segundos bloqueados. **Um quadro em
+trinta e cinco segundos**, porque a tela está parada — e é assim que deve ser.
+
+O preto observado em 19/08 nunca teve causa identificada na pipeline, e não se
+repetiu. A hipótese mais provável é a própria tela do notebook, que não é a
+mesma máquina usada agora.
+
+> **Uma última falha de instrumento, encontrada ao ler este teste.** A medição
+> de luminância disparava no primeiro quadro **da sessão**, não no primeiro
+> depois de uma cegueira: a flag que a arma sobrevivia ao teste de
+> `transmitindo`, e sem viewer ficava armada por minutos. A linha dizia
+> "primeiro quadro após cegueira" e mostrava a área de trabalho no instante em
+> que o viewer conectou. Corrigido — a flag é desarmada junto.
+
+**O que resta do item 3** é só a injeção de `Ctrl+Alt+Del`.
 
 **Consequência para o produto:** um operador que se conecta a uma máquina
 bloqueada não vê nada e não tem como ajudar. É a situação mais comum num

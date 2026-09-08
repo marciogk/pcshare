@@ -473,6 +473,15 @@ fn rodar(
         // medição de cegueira da Fase 3 depende dessa transição. O que se
         // poupa é o encode, que é o caro.
         if !transmitindo.load(Ordering::Relaxed) {
+            // Desarma a medição junto. Sem isto a flag sobrevive à espera e
+            // dispara no primeiro quadro da sessão, muitos minutos depois do
+            // episódio que a armou — foi o que aconteceu em 08/09/2026: a
+            // linha dizia "primeiro quadro após cegueira" e media a área de
+            // trabalho no instante em que o viewer conectou.
+            //
+            // Sem viewer não há encode, então não há o que medir de qualquer
+            // forma; o que não pode é medir e rotular errado.
+            medir_este = false;
             continue;
         }
 
