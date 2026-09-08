@@ -475,7 +475,37 @@ mesma máquina usada agora.
 > "primeiro quadro após cegueira" e mostrava a área de trabalho no instante em
 > que o viewer conectou. Corrigido — a flag é desarmada junto.
 
-**O que resta do item 3** é só a injeção de `Ctrl+Alt+Del`.
+#### Ctrl+Alt+Del: medido, falta decidir 🟡
+
+`SendInput` não gera a sequência — o Windows a reserva de propósito. O caminho
+é `SendSAS`, que **não devolve nada**: nem sucesso, nem código de erro. Se for
+recusada, falha calada. A única prova é observar se o desktop de entrada troca
+para `Winlogon`, e quem enxerga isso é o agente, que já relata trocas pelo
+canal.
+
+Medido em 08/09/2026, disparando a partir do supervisor (serviço, SYSTEM):
+
+| `SoftwareSASGeneration` | resultado |
+|---|---|
+| `0` — nenhum | **recusada**, nenhum relato em 4,7 s |
+| `1` — acessibilidade | **funcionou**, agente relatou `Winlogon` em 154 ms |
+
+> **Eu havia afirmado que seria preciso `2` ou `3`** — "serviços" ou "ambos" —
+> lendo a documentação. A medição desmente: `1` basta. Isso importa para a
+> decisão, porque `1` é um desvio bem menor da configuração padrão do que
+> autorizar serviços em geral.
+
+**A decisão que resta** é se o instalador deve elevar essa chave nas máquinas
+que estiverem em `0` — que é o provável numa instalação limpa. Três caminhos:
+
+| | o que significa |
+|---|---|
+| não implementar | o item 3 fecha sem CAD; concorrentes têm, mas muitos atendimentos não precisam |
+| instalador ajusta a chave | conveniência dos concorrentes, ao custo de mexer na máquina do cliente |
+| capacidade opcional | o código existe, a chave fica como está, e o administrador liga se quiser |
+
+O instrumento que produziu esta medição foi removido: ele disparava
+Ctrl+Alt+Del na subida do serviço e não tinha por que continuar no código.
 
 **Consequência para o produto:** um operador que se conecta a uma máquina
 bloqueada não vê nada e não tem como ajudar. É a situação mais comum num
