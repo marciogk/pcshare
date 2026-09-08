@@ -110,6 +110,7 @@ pub fn supervisionar(modo: Modo, parar: &AtomicBool) {
         endereco_de_escuta(&cfg),
         senha_da_sessao(&cfg),
         cfg.somente_ver(),
+        cfg.ctrl_alt_del(),
     );
 
 

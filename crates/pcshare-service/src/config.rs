@@ -73,6 +73,21 @@ impl Config {
             .is_some_and(|v| !v.is_empty() && v != "0")
     }
 
+    /// Permite que o viewer envie Ctrl+Alt+Del. **Desligado por padrão.**
+    ///
+    /// Fica desligado porque depende de uma política do Windows,
+    /// `SoftwareSASGeneration`, que numa instalação limpa costuma estar em `0`
+    /// — e nesse valor o `SendSAS` é recusado. Medido em 08/09/2026: recusado
+    /// em `0`, funciona a partir de `1`.
+    ///
+    /// A escolha de produto é não elevar essa chave na máquina de ninguém sem
+    /// que o administrador peça. Quem precisa de destravamento remoto liga as
+    /// duas coisas; quem não precisa não tem a postura de segurança alterada.
+    pub fn ctrl_alt_del(&self) -> bool {
+        self.buscar("ctrl_alt_del")
+            .is_some_and(|v| !v.is_empty() && v != "0")
+    }
+
     /// Relata o que foi lido, **sem a senha**.
     pub fn relatar(&self) {
         log(&format!("configuração: {}", self.origem));

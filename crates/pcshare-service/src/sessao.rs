@@ -57,6 +57,15 @@ const ESPERA: Duration = Duration::from_millis(2);
 #[derive(Clone, Copy)]
 pub struct SomenteVer(pub bool);
 
+/// Permite ao viewer enviar Ctrl+Alt+Del. Desligado por padrão.
+///
+/// Separado de [`SomenteVer`] de propósito: são permissões diferentes. Uma
+/// sessão pode observar sem controlar, controlar sem poder destravar, ou as
+/// duas coisas — e juntá-las numa chave só obrigaria a conceder demais para
+/// obter pouco.
+#[derive(Clone, Copy)]
+pub struct PermiteSas(pub bool);
+
 /// Sobe a thread que atende viewers, para sempre.
 ///
 /// Consome o `Servidor` do canal: a partir daqui é esta thread que fala com os
@@ -68,11 +77,13 @@ pub fn iniciar(
     endereco: SocketAddr,
     senha: String,
     somente_ver: bool,
+    permite_sas: bool,
 ) {
     let modo = SomenteVer(somente_ver);
+    let sas = PermiteSas(permite_sas);
     std::thread::Builder::new()
         .name("pcshare-sessao".into())
-        .spawn(move || atender_sempre(servidor, tx_desktop, endereco, senha, modo))
+        .spawn(move || atender_sempre(servidor, tx_desktop, endereco, senha, modo, sas))
         .ok();
 }
 
@@ -82,6 +93,7 @@ fn atender_sempre(
     endereco: SocketAddr,
     senha: String,
     modo: SomenteVer,
+    sas: PermiteSas,
 ) {
     let identidade = match identidade_da_maquina() {
         Ok(i) => i,
@@ -111,6 +123,24 @@ fn atender_sempre(
         "sessão: CONTROLE HABILITADO — quem conectar move o mouse e digita aqui \
          (somente_ver=1 na configuração para impedir)"
     });
+
+    if sas.0 {
+        // Conferir a política aqui, e não na hora do primeiro pedido, é o que
+        // impede a falha silenciosa: `SendSAS` não devolve erro, então um
+        // administrador que ligue `ctrl_alt_del=1` sem elevar a chave nunca
+        // saberia por que nada acontece.
+        match politica_de_sas() {
+            Some(0) => log(
+                r"sessão: Ctrl+Alt+Del PEDIDO mas INOPERANTE — SoftwareSASGeneration = 0. Eleve para 1 em HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System",
+            ),
+            Some(v) => log(&format!(
+                "sessão: Ctrl+Alt+Del habilitado (SoftwareSASGeneration = {v})"
+            )),
+            None => log(
+                "sessão: Ctrl+Alt+Del habilitado, mas não consegui ler a política; se não funcionar, confira SoftwareSASGeneration",
+            ),
+        }
+    }
 
     // Aceitar numa thread à parte, e não aqui, por um motivo concreto: este
     // laço é o **único** que esvazia o canal dos agentes. Bloqueando em
@@ -173,7 +203,7 @@ fn atender_sempre(
                 log(&format!("sessão {n}: cifrada com {}", sec.remote_fingerprint()));
                 let ligados = servidor.enviar_a_todos(&Mensagem::Capturar(true));
                 log(&format!("sessão {n}: {ligados} agentes transmitindo"));
-                let r = servir(sec, &servidor, &tx_desktop, &mut dimensoes, modo);
+                let r = servir(sec, &servidor, &tx_desktop, &mut dimensoes, modo, sas);
                 servidor.enviar_a_todos(&Mensagem::Capturar(false));
                 r
             }
@@ -210,6 +240,7 @@ fn servir<T: Transport>(
     tx_desktop: &Sender<String>,
     dimensoes: &mut Option<(u32, u32)>,
     modo: SomenteVer,
+    sas: PermiteSas,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // O viewer não desenha nada antes do `Hello`, e só o agente conhece a
     // resolução — o supervisor está na sessão 0, cego.
@@ -356,6 +387,16 @@ fn servir<T: Transport>(
                         let _ = servidor.enviar(id, &Mensagem::Entrada(m.encode()));
                     }
                 }
+                Ok(Message::RequestSAS) => {
+                    if sas.0 {
+                        log("sessão: viewer pediu Ctrl+Alt+Del");
+                        unsafe {
+                            windows::Win32::Security::Authentication::Identity::SendSAS(false);
+                        }
+                    } else {
+                        log("sessão: viewer pediu Ctrl+Alt+Del, recusado (ctrl_alt_del=0)");
+                    }
+                }
                 Ok(Message::RequestKeyframe) => {
                     if let Some(id) = agente_ativo {
                         let _ = servidor.enviar(id, &Mensagem::PedirKeyframe);
@@ -413,6 +454,26 @@ fn escoar(
 fn escoar_sem_viewer(servidor: &canal::Servidor, tx_desktop: &Sender<String>) {
     let mut dimensoes = None;
     while escoar(servidor, tx_desktop, &mut dimensoes).is_ok() {}
+}
+
+/// Lê `SoftwareSASGeneration`, que governa o `SendSAS`.
+///
+/// `None` quando não deu para ler — que é diferente de zero, e a distinção
+/// importa: zero significa "vai falhar", não-sei significa "confira".
+fn politica_de_sas() -> Option<u32> {
+    let saida = std::process::Command::new("reg")
+        .args([
+            "query",
+            r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System",
+            "/v",
+            "SoftwareSASGeneration",
+        ])
+        .output()
+        .ok()?;
+    let texto = String::from_utf8_lossy(&saida.stdout);
+    let bruto = texto.split_whitespace().last()?;
+    let sem_prefixo = bruto.strip_prefix("0x").unwrap_or(bruto);
+    u32::from_str_radix(sem_prefixo, 16).ok()
 }
 
 /// Identidade da **máquina**, não do usuário.

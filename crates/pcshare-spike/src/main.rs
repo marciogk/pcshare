@@ -64,6 +64,15 @@ const BACKLOG_LIMIT: usize = 512 * 1024;
 /// núcleo inteiro durante cada prompt de UAC. Medido.
 const BACKOFF_CEGO: Duration = Duration::from_millis(50);
 
+/// Códigos de varredura das teclas que formam o atalho do Ctrl+Alt+Del.
+///
+/// Comparados pelo byte baixo: as versões da direita chegam com o prefixo
+/// estendido `0xE0`, e para este atalho tanto faz qual das duas o operador
+/// usou.
+const SCAN_CTRL: u32 = 0x1D;
+const SCAN_ALT: u32 = 0x38;
+const SCAN_END: u32 = 0x4F;
+
 /// Base de tempo comum. Só faz sentido no modo de processo único.
 static START: OnceLock<Instant> = OnceLock::new();
 
@@ -1069,6 +1078,11 @@ fn run_viewer<T: Transport>(mut t: T) {
             .and_then(|i| a.get(i + 1).cloned())
     };
 
+    // Estado das modificadoras, para reconhecer Ctrl+Alt+End. O viewer recebe
+    // teclas soltas, não combinações — quem junta é quem escuta.
+    let mut ctrl_pressionado = false;
+    let mut alt_pressionado = false;
+
     let mut rgb = Vec::new();
     let mut frames = 0u64;
     let mut stale = 0u64;
@@ -1125,7 +1139,32 @@ fn run_viewer<T: Transport>(mut t: T) {
                     InputEvent::MouseButton { button, down }
                 }
                 window::RawEvent::Wheel { delta } => InputEvent::MouseWheel { delta },
-                window::RawEvent::Key { scancode, down } => InputEvent::Key { scancode, down },
+                window::RawEvent::Key { scancode, down } => {
+                    // Ctrl+Alt+End vira Ctrl+Alt+Del na máquina remota.
+                    //
+                    // O atalho não pode ser o próprio Ctrl+Alt+Del: a máquina
+                    // **local** o intercepta antes de qualquer programa ver —
+                    // é exatamente essa interceptação que dá à sequência o
+                    // valor de garantir uma tela de senha autêntica. O RDP usa
+                    // Ctrl+Alt+End pelo mesmo motivo, e seguir a convenção
+                    // poupa o operador de aprender mais uma.
+                    match scancode & 0xFF {
+                        SCAN_CTRL => ctrl_pressionado = down,
+                        SCAN_ALT => alt_pressionado = down,
+                        _ => {}
+                    }
+                    if down && scancode & 0xFF == SCAN_END && ctrl_pressionado && alt_pressionado {
+                        let m = Message::RequestSAS;
+                        if t.send(m.channel(), &m.encode()).is_err() {
+                            return;
+                        }
+                        println!("viewer: Ctrl+Alt+Del enviado ao host");
+                        // Não repassa as teclas: o host receberia um End solto
+                        // no meio da sequência.
+                        continue;
+                    }
+                    InputEvent::Key { scancode, down }
+                }
             };
             let m = Message::Input(ev);
             if t.send(m.channel(), &m.encode()).is_err() {

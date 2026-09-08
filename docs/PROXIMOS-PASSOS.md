@@ -495,17 +495,30 @@ Medido em 08/09/2026, disparando a partir do supervisor (serviço, SYSTEM):
 > decisão, porque `1` é um desvio bem menor da configuração padrão do que
 > autorizar serviços em geral.
 
-**A decisão que resta** é se o instalador deve elevar essa chave nas máquinas
-que estiverem em `0` — que é o provável numa instalação limpa. Três caminhos:
+**Decidido: capacidade opcional.** O código existe, o instalador **não** mexe
+na política de ninguém, e quem precisa liga as duas coisas.
 
-| | o que significa |
-|---|---|
-| não implementar | o item 3 fecha sem CAD; concorrentes têm, mas muitos atendimentos não precisam |
-| instalador ajusta a chave | conveniência dos concorrentes, ao custo de mexer na máquina do cliente |
-| capacidade opcional | o código existe, a chave fica como está, e o administrador liga se quiser |
+Implementado assim:
 
-O instrumento que produziu esta medição foi removido: ele disparava
-Ctrl+Alt+Del na subida do serviço e não tinha por que continuar no código.
+- `Message::RequestSAS` (tag `0x07`) — viewer → host. Mensagem própria, e não
+  um `Input`, porque `SendInput` não gera a sequência: só `SendSAS`, e só do
+  serviço.
+- `ctrl_alt_del=1` no `config.txt` habilita. **Desligado por padrão.**
+- No viewer, o atalho é **`Ctrl+Alt+End`** — a convenção do RDP. Não pode ser
+  o próprio Ctrl+Alt+Del: a máquina *local* o intercepta antes de qualquer
+  programa ver, e é justamente essa interceptação que dá valor à sequência.
+- Na subida, o supervisor **confere a política e avisa**:
+
+  ```
+  sessão: Ctrl+Alt+Del PEDIDO mas INOPERANTE — SoftwareSASGeneration = 0.
+          Eleve para 1 em HKLM\SOFTWARE\...\Policies\System
+  ```
+
+  Sem esse aviso, um administrador que ligue `ctrl_alt_del=1` sem elevar a
+  chave nunca saberia por que nada acontece — `SendSAS` não devolve erro.
+
+O instrumento que produziu a medição foi removido: ele disparava Ctrl+Alt+Del
+na subida do serviço e não tinha por que continuar no código.
 
 **Consequência para o produto:** um operador que se conecta a uma máquina
 bloqueada não vê nada e não tem como ajudar. É a situação mais comum num

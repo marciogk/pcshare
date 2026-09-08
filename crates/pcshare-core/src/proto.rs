@@ -77,6 +77,13 @@ pub enum Message {
     /// depender de relógios sincronizados entre as duas máquinas.
     Ping { nonce: u64, sent_us: i64 },
     Pong { nonce: u64, sent_us: i64 },
+    /// Viewer → host: envie um Ctrl+Alt+Del na máquina remota.
+    ///
+    /// Não é um `Input` comum, e não poderia ser. O Windows reserva essa
+    /// combinação: `SendInput` não a gera, de propósito, porque é ela que
+    /// garante ao usuário que a tela de senha é a verdadeira. Gerá-la exige
+    /// `SendSAS`, que só o serviço pode chamar — daí a mensagem separada.
+    RequestSAS,
 }
 
 const TAG_HELLO: u8 = 0x01;
@@ -85,6 +92,7 @@ const TAG_REQUEST_KEYFRAME: u8 = 0x03;
 const TAG_INPUT: u8 = 0x04;
 const TAG_PING: u8 = 0x05;
 const TAG_PONG: u8 = 0x06;
+const TAG_REQUEST_SAS: u8 = 0x07;
 
 const IN_MOUSE_MOVE: u8 = 0x01;
 const IN_MOUSE_BUTTON: u8 = 0x02;
@@ -125,6 +133,7 @@ impl Message {
                 b.extend_from_slice(data);
             }
             Message::RequestKeyframe => b.push(TAG_REQUEST_KEYFRAME),
+            Message::RequestSAS => b.push(TAG_REQUEST_SAS),
             Message::Input(ev) => {
                 b.push(TAG_INPUT);
                 encode_input(&mut b, ev);
@@ -164,6 +173,7 @@ impl Message {
                 }
             }
             TAG_REQUEST_KEYFRAME => Message::RequestKeyframe,
+            TAG_REQUEST_SAS => Message::RequestSAS,
             TAG_INPUT => Message::Input(decode_input(&mut r)?),
             TAG_PING => Message::Ping {
                 nonce: r.u64()?,
@@ -321,6 +331,7 @@ mod tests {
             data: vec![0, 1, 2, 250],
         });
         roundtrip(Message::RequestKeyframe);
+        roundtrip(Message::RequestSAS);
         roundtrip(Message::Ping {
             nonce: 7,
             sent_us: 123456789,
