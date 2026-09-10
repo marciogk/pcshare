@@ -141,6 +141,13 @@ fn atender_sempre(
 
     log(&format!("sessão: ID desta máquina {meu_id}"));
     log(&format!("sessão: senha {senha}"));
+    if senha_fraca(&senha) {
+        log(
+            "sessão: AVISO senha fraca (curta ou pouca variação). O recuo protege \
+             contra força bruta, mas antes de expor à internet vale uma senha mais \
+             longa — troque em config.txt, chave 'senha'.",
+        );
+    }
     log(if modo.0 {
         "sessão: SOMENTE VISUALIZAÇÃO — entrada do viewer será descartada"
     } else {
@@ -213,6 +220,8 @@ fn atender_sempre(
     // máquina que o usuário justamente não alcança. Foi o defeito mais grave
     // encontrado no teste entre duas máquinas.
     let mut n = 0u64;
+    // Senhas erradas seguidas. Zera quando uma sessão autentica.
+    let mut falhas_auth = 0u32;
     loop {
         // Sem viewer, escoa o canal e volta a olhar. É aqui que os relatos de
         // desktop continuam chegando ao supervisor com a tela ociosa.
@@ -224,22 +233,90 @@ fn atender_sempre(
         };
 
         n += 1;
+
+        // Recuo contra força bruta de senha, **antes** de tentar autenticar.
+        //
+        // Atrás do encontro, todo viewer chega com o endereço do relay, não o
+        // do atacante — então o host não distingue quem tenta, e o recuo é
+        // global: cada senha errada afasta a tentativa seguinte, dobrando até
+        // um teto de 60 s. Isso limita o atacante a ~1 tentativa por minuto;
+        // contra os 100 milhões de senhas de 8 dígitos, são séculos.
+        //
+        // O preço é uma janela de negação: um atacante insistente atrasa
+        // também o usuário legítimo, até 60 s. É limitado de propósito, e some
+        // assim que uma senha certa passa. Estreitar por origem real exigiria
+        // o encontro repassar o IP do viewer — anotado para depois.
+        if falhas_auth > 0 {
+            let espera = recuo_auth(falhas_auth);
+            log(&format!(
+                "sessão: {falhas_auth} tentativa(s) recusada(s); aguardando {} s",
+                espera.as_secs()
+            ));
+            std::thread::sleep(espera);
+        }
+
         log(&format!("--- sessão {n} iniciada ---"));
-        let resultado = match secure::accept(t, &identidade, &senha) {
+        match secure::accept(t, &identidade, &senha) {
             Ok(sec) => {
+                falhas_auth = 0; // uma sessão legítima zera o recuo
                 log(&format!("sessão {n}: cifrada com {}", sec.remote_fingerprint()));
                 let ligados = servidor.enviar_a_todos(&Mensagem::Capturar(true));
                 log(&format!("sessão {n}: {ligados} agentes transmitindo"));
                 let r = servir(sec, &servidor, &tx_desktop, &mut dimensoes, modo, sas);
                 servidor.enviar_a_todos(&Mensagem::Capturar(false));
-                r
+                match r {
+                    Ok(()) => log(&format!("--- sessão {n} encerrada ---")),
+                    Err(e) => log(&format!("--- sessão {n} encerrada: {} ---", motivo(e.as_ref()))),
+                }
             }
-            Err(e) => Err(Box::new(e) as Box<dyn std::error::Error>),
-        };
-        match resultado {
-            Ok(()) => log(&format!("--- sessão {n} encerrada ---")),
-            Err(e) => log(&format!("--- sessão {n} encerrada: {} ---", motivo(e.as_ref()))),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                falhas_auth = falhas_auth.saturating_add(1);
+                log(&format!(
+                    "--- sessão {n} encerrada: autenticação recusada (senha incorreta) [{falhas_auth}] ---"
+                ));
+            }
+            Err(e) => log(&format!("--- sessão {n} encerrada: {} ---", motivo(&e))),
         }
+    }
+}
+
+/// Quanto esperar antes da próxima tentativa, após `falhas` senhas erradas.
+///
+/// Dobra a cada falha, com teto de 60 s. O teto é o que limita o atacante a
+/// cerca de uma tentativa por minuto sem prender o usuário legítimo por muito
+/// tempo quando o recuo o alcança.
+fn recuo_auth(falhas: u32) -> Duration {
+    let segundos = 1u64 << falhas.min(6); // 2, 4, 8, 16, 32, 64
+    Duration::from_secs(segundos.min(60))
+}
+
+/// Sinaliza uma senha obviamente fraca. Não é medidor de entropia — é o mínimo
+/// para pegar "1234" e "00000000" e nudge o operador antes da internet.
+fn senha_fraca(s: &str) -> bool {
+    let distintos: std::collections::HashSet<char> = s.chars().collect();
+    s.chars().count() < 8 || distintos.len() <= 2
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recuo_dobra_e_tem_teto_de_60s() {
+        assert_eq!(recuo_auth(1), Duration::from_secs(2));
+        assert_eq!(recuo_auth(3), Duration::from_secs(8));
+        assert_eq!(recuo_auth(5), Duration::from_secs(32));
+        assert_eq!(recuo_auth(6), Duration::from_secs(60), "64 capado em 60");
+        // Não pode estourar o deslocamento nem o teto por mais falhas.
+        assert_eq!(recuo_auth(1000), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn senha_fraca_pega_os_casos_obvios() {
+        assert!(senha_fraca("482913"), "seis dígitos é curta");
+        assert!(senha_fraca("00000000"), "um caractere repetido");
+        assert!(senha_fraca("abababab"), "só dois distintos, ainda que com 8");
+        assert!(!senha_fraca("k7$Pq2mZ"), "oito variados passa");
     }
 }
 

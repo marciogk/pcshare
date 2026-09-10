@@ -195,14 +195,19 @@ impl Identity {
     }
 }
 
-/// Senha de sessão de seis dígitos, sorteada pelo gerador do sistema.
+/// Senha de sessão de oito dígitos, sorteada pelo gerador do sistema.
 ///
-/// Curta porque alguém vai ditá-la por telefone. É o KDF caro (Argon2id) que
-/// compensa o espaço pequeno — e uma senha de sessão deve ser trocada a cada
-/// atendimento, não reaproveitada.
+/// Oito, e não seis, foi decisão de 10/09/2026, ao expor o host à internet
+/// pelo encontro: seis dígitos são um milhão de combinações, e mesmo com o
+/// recuo do host isso é fino demais para o alcance da internet inteira. Oito
+/// são cem milhões — ainda ditável por telefone, e com o recuo (≈1 tentativa
+/// por minuto) a força bruta passa a levar séculos.
+///
+/// Continua valendo: o KDF caro (Argon2id) encarece cada tentativa local, e
+/// uma senha de sessão deve ser trocada a cada atendimento, não reaproveitada.
 pub fn random_password() -> String {
     use rand::RngExt;
-    format!("{:06}", rand::rng().random_range(0..1_000_000u32))
+    format!("{:08}", rand::rng().random_range(0..100_000_000u32))
 }
 
 /// Impressão digital legível, para conferência fora de banda.
