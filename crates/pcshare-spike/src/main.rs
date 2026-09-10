@@ -16,7 +16,7 @@ use pcshare_input as input;
 mod window;
 
 use std::collections::VecDeque;
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -119,7 +119,6 @@ fn main() {
 
     match args.first().map(String::as_str) {
         Some("host") => {
-            let bind = args.get(1).cloned().unwrap_or_else(|| "0.0.0.0:7000".into());
             let identity = load_identity().expect("identidade");
             let password = arg_value("--password").unwrap_or_else(secure::random_password);
 
@@ -127,26 +126,43 @@ fn main() {
             println!("  Senha da sessão  : {password}");
             println!("  Impressão digital: {}\n", identity.fingerprint());
 
-            println!("host escutando em {bind} ({})\n", transporte(quic));
-            if quic {
-                let listener =
-                    QuicListener::bind(bind.parse().expect("endereço inválido")).expect("bind");
-                atender(|| listener.accept(), &identity, &password, plaintext);
-            } else {
-                let listener = TcpListener::bind(&bind).expect("bind falhou");
+            // `--encontro <servidor>`: em vez de escutar numa porta — que
+            // ninguém alcança atrás de um NAT —, o host conecta **de saída** a
+            // um servidor de encontro e se registra sob o próprio ID. É o
+            // caminho que funciona pela internet.
+            //
+            // A mesma função `atender` serve aos dois modos: ela só quer um
+            // fechamento que devolva um transporte pronto. Escutar ou
+            // registrar-se são duas formas de obter o mesmo.
+            if let Some(enc) = arg_value("--encontro") {
+                let enc: SocketAddr = enc.parse().expect("endereço do encontro inválido");
+                let meu_id = identity.display_id();
+                println!("registrando no encontro {enc} como {meu_id}\n");
                 atender(
-                    || TcpTransport::accept(&listener),
+                    || pcshare_encontro::registrar_e_esperar(enc, &meu_id),
                     &identity,
                     &password,
                     plaintext,
                 );
+            } else {
+                let bind = args.get(1).cloned().unwrap_or_else(|| "0.0.0.0:7000".into());
+                println!("host escutando em {bind} ({})\n", transporte(quic));
+                if quic {
+                    let listener =
+                        QuicListener::bind(bind.parse().expect("endereço inválido")).expect("bind");
+                    atender(|| listener.accept(), &identity, &password, plaintext);
+                } else {
+                    let listener = TcpListener::bind(&bind).expect("bind falhou");
+                    atender(
+                        || TcpTransport::accept(&listener),
+                        &identity,
+                        &password,
+                        plaintext,
+                    );
+                }
             }
         }
         Some("viewer") => {
-            let addr = args
-                .get(1)
-                .cloned()
-                .unwrap_or_else(|| "127.0.0.1:7000".into());
             let password = if plaintext {
                 String::new()
             } else {
@@ -159,8 +175,30 @@ fn main() {
                 }
             };
             let identity = load_identity().expect("identidade");
-            println!("viewer conectando a {addr} ({})", transporte(quic));
 
+            // `--encontro <servidor> --id <id>`: conecta pela internet,
+            // digitando o ID da máquina em vez do endereço de rede dela.
+            if let Some(enc) = arg_value("--encontro") {
+                let enc: SocketAddr = enc.parse().expect("endereço do encontro inválido");
+                let Some(id) = arg_value("--id") else {
+                    eprintln!("viewer: informe --id <ID da máquina> junto com --encontro");
+                    return;
+                };
+                println!("procurando a máquina {id} pelo encontro {enc}");
+                match pcshare_encontro::conectar_por_id(enc, &id) {
+                    Ok(t) => assistir(t, &identity, &password, plaintext),
+                    // Mensagem clara em vez de pânico: aqui o erro é operacional
+                    // (ID errado, máquina offline, ocupada), não um defeito.
+                    Err(e) => eprintln!("não foi possível conectar: {e}"),
+                }
+                return;
+            }
+
+            let addr = args
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| "127.0.0.1:7000".into());
+            println!("viewer conectando a {addr} ({})", transporte(quic));
             if quic {
                 let t = QuicTransport::connect(addr.parse().expect("endereço inválido"))
                     .expect("connect falhou");

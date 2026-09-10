@@ -34,8 +34,10 @@
 //! com o servidor antes de o repasse começar. O servidor em si é o binário
 //! `main.rs`; religar host e viewer para falá-lo é dos crates deles.
 
+use pcshare_core::quic::QuicTransport;
 use pcshare_core::{Channel, Transport};
 use std::io;
+use std::net::SocketAddr;
 
 pub mod servidor;
 
@@ -178,6 +180,88 @@ pub fn receber<T: Transport>(t: &mut T) -> io::Result<Mensagem> {
             ));
         }
         std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
+// -------------------------------------------------- lado do host e do viewer
+
+/// Host: conecta ao encontro, registra-se sob `id`, e **bloqueia até um viewer
+/// chegar**. Devolve o transporte já emparelhado, pronto para `secure::accept`.
+///
+/// A espera pelo par não tem prazo — um viewer pode levar horas —, ao contrário
+/// da espera pela confirmação do registro, que o servidor responde na hora. Se
+/// a conexão com o servidor cair enquanto se espera, isto retorna erro, e o
+/// host deve reconectar e registrar-se de novo.
+pub fn registrar_e_esperar(servidor: SocketAddr, id: &str) -> io::Result<QuicTransport> {
+    let mut t = QuicTransport::connect(servidor)?;
+    enviar(&mut t, &Mensagem::Registrar(id.to_string()))?;
+    match receber(&mut t)? {
+        Mensagem::RegistroOk => {}
+        outra => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("servidor de encontro respondeu {outra:?} ao registro"),
+            ));
+        }
+    }
+    esperar_emparelhado(&mut t)?;
+    Ok(t)
+}
+
+/// Viewer: conecta ao encontro e pede `id`. Devolve o transporte emparelhado,
+/// pronto para `secure::connect`.
+///
+/// Os erros são **específicos**, e isso é o ponto: um viewer que só diz
+/// "não deu" manda o operador tentar de novo às cegas. Aqui, "máquina não
+/// encontrada" e "máquina ocupada" dizem o que fazer — conferir o ID, ou
+/// esperar o colega desconectar.
+pub fn conectar_por_id(servidor: SocketAddr, id: &str) -> io::Result<QuicTransport> {
+    let mut t = QuicTransport::connect(servidor)?;
+    enviar(&mut t, &Mensagem::Conectar(id.to_string()))?;
+    match receber(&mut t)? {
+        Mensagem::Emparelhado => Ok(t),
+        Mensagem::Indisponivel => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "máquina não encontrada — confira o ID, ou ela pode estar desligada ou sem rede",
+        )),
+        Mensagem::Ocupado => Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            "máquina já está em outra sessão — tente de novo em instantes",
+        )),
+        outra => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("servidor de encontro respondeu {outra:?}"),
+        )),
+    }
+}
+
+/// Espera o [`Mensagem::Emparelhado`], **sem prazo**.
+///
+/// Separado de [`receber`] de propósito: aquele tem teto de 15 s, certo para
+/// uma resposta que o servidor dá na hora, errado para uma espera que dura o
+/// que durar até alguém do outro lado querer conectar.
+fn esperar_emparelhado<T: Transport>(t: &mut T) -> io::Result<()> {
+    loop {
+        match t.poll()? {
+            Some((Channel::Control, dados)) => match Mensagem::decodificar(&dados) {
+                Some(Mensagem::Emparelhado) => return Ok(()),
+                Some(outra) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("esperava emparelhamento, veio {outra:?}"),
+                    ));
+                }
+                None => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "sinalização ilegível enquanto esperava o par",
+                    ));
+                }
+            },
+            // Mídia antes do emparelhamento é ruído; ignora e segue esperando.
+            Some(_) => {}
+            None => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
     }
 }
 

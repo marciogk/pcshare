@@ -807,6 +807,7 @@ dependencies = [
  "pcshare-capture",
  "pcshare-codec",
  "pcshare-core",
+ "pcshare-encontro",
  "pcshare-gpu",
  "pcshare-input",
  "windows",
