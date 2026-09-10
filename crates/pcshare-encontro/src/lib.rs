@@ -37,6 +37,8 @@
 use pcshare_core::{Channel, Transport};
 use std::io;
 
+pub mod servidor;
+
 /// Tempo máximo esperando uma resposta do servidor de encontro.
 ///
 /// Vale para cada troca da sinalização, não para a sessão. Um servidor mudo

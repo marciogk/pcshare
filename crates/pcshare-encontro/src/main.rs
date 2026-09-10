@@ -1,26 +1,44 @@
-//! Servidor de encontro do PCShare (esqueleto).
+//! Servidor de encontro do PCShare.
 //!
 //! Casa duas máquinas pelo ID e repassa bytes cifrados entre elas. Roda numa
 //! máquina com endereço público; host e viewer conectam **de saída** até aqui,
 //! e por isso atravessam o NAT dos dois lados sem configuração.
 //!
-//! O protocolo já existe em `lib.rs`. O que falta, e vem no próximo passo:
+//! A lógica vive em `servidor.rs`, na biblioteca, para poder ser testada. Aqui
+//! só se lê o endereço e se sobe.
 //!
-//!   - aceitar conexões num `QuicListener`;
-//!   - ler o primeiro `Mensagem` de cada uma: `Registrar` guarda o host num
-//!     mapa `id → conexão`; `Conectar` procura o par;
-//!   - ao casar, responder `Emparelhado` aos dois e repassar cada
-//!     `(Channel, payload)` de um lado para o outro até a sessão cair;
-//!   - `Indisponivel` quando o ID não está registrado, `Ocupado` quando já há
-//!     sessão.
-//!
-//! Nada disso decifra a sessão: o repasse é de payloads que o Noise já cifrou.
+//!     pcshare-encontro [endereço]      # padrão 0.0.0.0:7100
+//!     PCSHARE_ENCONTRO_BIND=... pcshare-encontro
+
+use std::net::SocketAddr;
+
+use pcshare_core::quic::QuicListener;
+use pcshare_encontro::servidor::servir;
+
+const BIND_PADRAO: &str = "0.0.0.0:7100";
 
 fn main() {
-    eprintln!(
-        "pcshare-encontro: servidor de sinalização e repasse.\n\
-         O protocolo está pronto (lib.rs); o servidor é o próximo passo.\n\
-         Ver docs/PROXIMOS-PASSOS.md, fase de sinalização."
-    );
-    std::process::exit(1);
+    let endereco = std::env::args()
+        .nth(1)
+        .or_else(|| std::env::var("PCSHARE_ENCONTRO_BIND").ok())
+        .unwrap_or_else(|| BIND_PADRAO.to_string());
+
+    let endereco: SocketAddr = match endereco.parse() {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("endereço inválido '{endereco}': {e}");
+            std::process::exit(2);
+        }
+    };
+
+    let escuta = match QuicListener::bind(endereco) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("não consegui escutar em {endereco}: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    println!("pcshare-encontro escutando em {endereco}");
+    servir(escuta);
 }
