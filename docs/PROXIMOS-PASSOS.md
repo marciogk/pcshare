@@ -140,12 +140,19 @@ no viewer, `--encontro <servidor> --id <id>`.
 
 **O que falta, nesta ordem:**
 
-1. **Endurecer a autenticação** 🔴 portão para a internet. A senha de seis
-   dígitos sem limite de tentativas é aceitável em LAN e tailnet, não na
-   internet aberta — um milhão de combinações cai em horas. Senha maior e recuo
-   após tentativas seguidas, **antes** de o servidor público ir ao ar.
-2. **Provisionar o servidor de encontro público** e testar entre redes reais.
-   Decisão de hospedagem adiada até aqui, de propósito.
+1. **Endurecer a autenticação** ✅ 10/09/2026 (commit `c16e825`). Recuo global
+   contra força bruta no laço de sessão — cada senha errada dobra o atraso da
+   próxima, teto 60 s, zerado por uma sessão legítima; limita o atacante a ~1
+   tentativa/min. Senha aleatória subiu de 6 para 8 dígitos (100 milhões). Aviso
+   de senha fraca na subida. Provado: `[1]`/`[2]` e `aguardando 2 s` no log.
+
+   > O recuo é **global**, não por origem, porque atrás do encontro todo viewer
+   > chega com o IP do relay. O preço é uma janela de negação de até 60 s,
+   > limitada de propósito. Estreitar por origem exige o encontro repassar o IP
+   > do viewer — refinamento anotado, não bloqueante.
+
+2. **Provisionar o servidor de encontro público** 🔴 e testar entre redes
+   reais. Decisão de hospedagem adiada até aqui, de propósito. É o próximo.
 3. **Furo de NAT** 🟡 otimização. O servidor informa a cada lado o endereço do
    outro; os dois furam o NAT e a sessão vira direta, tirando o vídeo do relay.
    O relay continua como plano B. Reduz o custo variável de banda da D6.
