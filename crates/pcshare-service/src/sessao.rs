@@ -25,7 +25,7 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use pcshare_capture::canal::{self, Mensagem};
-use pcshare_core::quic::QuicListener;
+use pcshare_core::quic::{QuicListener, QuicTransport};
 use pcshare_core::{Channel, Identity, Message, Transport, secure};
 
 use crate::supervisor::log;
@@ -75,6 +75,7 @@ pub fn iniciar(
     servidor: canal::Servidor,
     tx_desktop: Sender<String>,
     endereco: SocketAddr,
+    encontro: Option<SocketAddr>,
     senha: String,
     somente_ver: bool,
     permite_sas: bool,
@@ -83,7 +84,7 @@ pub fn iniciar(
     let sas = PermiteSas(permite_sas);
     std::thread::Builder::new()
         .name("pcshare-sessao".into())
-        .spawn(move || atender_sempre(servidor, tx_desktop, endereco, senha, modo, sas))
+        .spawn(move || atender_sempre(servidor, tx_desktop, endereco, encontro, senha, modo, sas))
         .ok();
 }
 
@@ -91,6 +92,7 @@ fn atender_sempre(
     servidor: canal::Servidor,
     tx_desktop: Sender<String>,
     endereco: SocketAddr,
+    encontro: Option<SocketAddr>,
     senha: String,
     modo: SomenteVer,
     sas: PermiteSas,
@@ -105,17 +107,39 @@ fn atender_sempre(
             return;
         }
     };
-    let escuta = match QuicListener::bind(endereco) {
-        Ok(l) => l,
-        Err(e) => {
-            log(&format!("sessão: não consegui escutar em {endereco} ({e})"));
-            escoar_sem_viewer(&servidor, &tx_desktop);
-            return;
-        }
-    };
+    let meu_id = identidade.display_id();
 
-    log(&format!("sessão: escutando em {endereco}"));
-    log(&format!("sessão: ID desta máquina {}", identidade.display_id()));
+    // De onde vem o próximo viewer. Duas formas de obter o mesmo transporte:
+    //
+    // - **encontro**: conecta de saída a um servidor público e se registra sob
+    //   o ID. É o caminho que funciona pela internet, porque conexão de saída
+    //   atravessa qualquer NAT. `registrar_e_esperar` bloqueia até um viewer
+    //   chegar, exatamente como `accept`.
+    // - **escuta local**: vincula uma porta e aceita. Serve na LAN e no
+    //   tailnet, e é o caminho de teste.
+    //
+    // Tudo depois daqui opera sobre o `Transport` e não sabe qual foi.
+    let mut obter_viewer: Box<dyn FnMut() -> std::io::Result<QuicTransport> + Send> =
+        match encontro {
+            Some(enc) => {
+                log(&format!("sessão: registrando no encontro {enc} como {meu_id}"));
+                let id = meu_id.clone();
+                Box::new(move || pcshare_encontro::registrar_e_esperar(enc, &id))
+            }
+            None => match QuicListener::bind(endereco) {
+                Ok(escuta) => {
+                    log(&format!("sessão: escutando em {endereco}"));
+                    Box::new(move || escuta.accept())
+                }
+                Err(e) => {
+                    log(&format!("sessão: não consegui escutar em {endereco} ({e})"));
+                    escoar_sem_viewer(&servidor, &tx_desktop);
+                    return;
+                }
+            },
+        };
+
+    log(&format!("sessão: ID desta máquina {meu_id}"));
     log(&format!("sessão: senha {senha}"));
     log(if modo.0 {
         "sessão: SOMENTE VISUALIZAÇÃO — entrada do viewer será descartada"
@@ -152,7 +176,7 @@ fn atender_sempre(
         .spawn(move || {
             let mut falhas = 0u32;
             loop {
-                match escuta.accept() {
+                match obter_viewer() {
                     Ok(t) => {
                         falhas = 0;
                         if tx_viewer.send(t).is_err() {
@@ -160,15 +184,18 @@ fn atender_sempre(
                         }
                     }
                     Err(e) => {
-                        // Uma tentativa de conexão que morre no meio não pode
-                        // derrubar o atendimento — foi assim que o host do
-                        // spike encerrou sozinho num teste real.
+                        // Uma tentativa que morre no meio não pode derrubar o
+                        // atendimento — foi assim que o host do spike encerrou
+                        // sozinho num teste real. No modo encontro, isto também
+                        // cobre o servidor cair: o host recua e volta a tentar
+                        // registrar-se, em vez de desistir na primeira falha.
                         falhas += 1;
-                        log(&format!("sessão: conexão incompleta ({e})"));
+                        log(&format!("sessão: obter viewer falhou ({e})"));
                         if falhas >= 50 {
-                            log("sessão: 50 falhas seguidas ao aceitar; desistindo");
+                            log("sessão: 50 falhas seguidas; desistindo");
                             return;
                         }
+                        std::thread::sleep(Duration::from_millis(500));
                     }
                 }
             }

@@ -108,6 +108,7 @@ pub fn supervisionar(modo: Modo, parar: &AtomicBool) {
         servidor,
         tx,
         endereco_de_escuta(&cfg),
+        cfg.encontro(),
         senha_da_sessao(&cfg),
         cfg.somente_ver(),
         cfg.ctrl_alt_del(),

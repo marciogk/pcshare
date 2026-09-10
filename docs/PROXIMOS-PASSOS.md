@@ -113,6 +113,44 @@ cd "c:\Projeto Pcshare"
 
 ## O que vem a seguir
 
+### Conectar por ID, pela internet (fase de sinalização) 🟢 em curso
+
+O que torna o PCShare conectável de qualquer lugar digitando um ID, como o
+AnyDesk. **Feito e provado localmente; falta só o servidor público.**
+
+O mecanismo, e por que funciona: conexão de **saída** atravessa qualquer NAT.
+Host e viewer conectam de saída a um servidor de encontro; ele casa os dois
+pelo ID e repassa bytes cifrados. Como o Noise é ponta a ponta, o servidor é um
+cano cego — não tem senha, não decifra quadro. Decisão registrada na D6:
+**QUIC, não WebRTC** (preserva a pilha já construída).
+
+Estado, por commit:
+
+| commit | o que |
+|---|---|
+| `5a25d78` | protocolo do encontro (`pcshare-encontro`) |
+| `ddacd38` | servidor de encontro, 3 testes de integração |
+| `9ea94f1` | spike conecta por ID — quadro real atravessou |
+| _este_ | supervisor conecta por ID — caminho de produto completo |
+
+Provado local: encontro + supervisor (modo console) + viewer por ID, tudo em
+`127.0.0.1`. O viewer digitou `895 570 225`, achou a máquina, e recebeu a tela
+pelo relay, cifrada. `config.txt`: `encontro=<servidor>` liga o modo no host;
+no viewer, `--encontro <servidor> --id <id>`.
+
+**O que falta, nesta ordem:**
+
+1. **Endurecer a autenticação** 🔴 portão para a internet. A senha de seis
+   dígitos sem limite de tentativas é aceitável em LAN e tailnet, não na
+   internet aberta — um milhão de combinações cai em horas. Senha maior e recuo
+   após tentativas seguidas, **antes** de o servidor público ir ao ar.
+2. **Provisionar o servidor de encontro público** e testar entre redes reais.
+   Decisão de hospedagem adiada até aqui, de propósito.
+3. **Furo de NAT** 🟡 otimização. O servidor informa a cada lado o endereço do
+   outro; os dois furam o NAT e a sessão vira direta, tirando o vídeo do relay.
+   O relay continua como plano B. Reduz o custo variável de banda da D6.
+
+
 ### 1. Medir a arquitetura nova 🟡 imagem e latência feitas; falta o UAC
 
 **Imagem atravessa.** Supervisor, agente e viewer em loopback: `1360x768`,

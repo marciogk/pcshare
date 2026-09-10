@@ -73,6 +73,23 @@ impl Config {
             .is_some_and(|v| !v.is_empty() && v != "0")
     }
 
+    /// Endereço do servidor de encontro, se houver.
+    ///
+    /// Com ele, o host **conecta de saída** e se registra sob o próprio ID, em
+    /// vez de escutar numa porta — que ninguém alcança atrás de um NAT. É o que
+    /// permite conectar pela internet digitando o ID, como o AnyDesk. Sem ele,
+    /// o comportamento é o de sempre: escutar em `bind`, para LAN e tailnet.
+    pub fn encontro(&self) -> Option<std::net::SocketAddr> {
+        let bruto = self.buscar("encontro")?;
+        match bruto.parse() {
+            Ok(a) => Some(a),
+            Err(e) => {
+                log(&format!("encontro inválido ('{bruto}'): {e}; ignorando"));
+                None
+            }
+        }
+    }
+
     /// Permite que o viewer envie Ctrl+Alt+Del. **Desligado por padrão.**
     ///
     /// Fica desligado porque depende de uma política do Windows,
