@@ -770,6 +770,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pcshare-encontro"
+version = "0.0.1"
+dependencies = [
+ "pcshare-core",
+]
+
+[[package]]
 name = "pcshare-gpu"
 version = "0.0.1"
 dependencies = [

@@ -1,0 +1,13 @@
+[package]
+name = "pcshare-encontro"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "pcshare-encontro"
+path = "src/main.rs"
+
+[dependencies]
+pcshare-core = { version = "0.0.1", path = "../pcshare-core" }

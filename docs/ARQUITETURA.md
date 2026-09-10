@@ -217,12 +217,36 @@ autorizado.
 
 ### D6 — Sinalização não trafega vídeo
 
-Servidor de sinalização faz autenticação, resolve ID → peer, e intermedeia a
-troca de SDP/ICE. Uma vez estabelecida a sessão, sai do caminho.
+Servidor de encontro resolve ID → máquina e casa os dois lados. Host e viewer
+conectam **de saída** até ele, o que atravessa o NAT dos dois sem configuração.
 
-**Consequência de negócio:** quando o P2P não fecha, o tráfego cai no TURN e
-*toda* a banda de vídeo passa por você. É o principal custo variável de
-infraestrutura e precisa estar na precificação desde o começo.
+**Revisto em 10/09/2026: o encontro é sobre QUIC, não WebRTC.** A versão
+anterior desta decisão previa "SDP/ICE" e WebRTC — escrita antes de a pilha
+QUIC + Noise existir. Adotar WebRTC agora significaria descartar o transporte
+QUIC e a criptografia Noise já construídos e medidos, em troca de DTLS/ICE. Não
+compensa: o QUIC roda sobre UDP, que é exatamente o que o furo de NAT precisa, e
+a mesma travessia se faz mantendo a pilha atual. O protocolo de sinalização
+vive em `crates/pcshare-encontro`.
+
+Duas etapas, nesta ordem:
+
+1. **Relay primeiro.** O servidor casa os dois e **repassa bytes cifrados**
+   entre eles. Funciona atrás de qualquer NAT de imediato, e o servidor é um
+   cano cego — o Noise é ponta a ponta por cima, então ele não decifra nada
+   (é o que a decisão D7 garante). O relay é também o plano B permanente.
+2. **Furo de NAT como otimização.** O servidor informa a cada lado o endereço
+   público do outro; os dois mandam pacotes QUIC ao mesmo tempo, o NAT abre, e
+   a sessão passa a ser direta. Tira o tráfego do relay quando dá.
+
+**Consequência de negócio:** quando o furo de NAT não fecha, *toda* a banda de
+vídeo passa pelo relay — seu servidor, seu custo. É o principal custo variável
+de infraestrutura e precisa estar na precificação desde o começo.
+
+**Pré-requisito de segurança:** o encontro por ID expõe o host à internet
+inteira. A autenticação atual — senha de seis dígitos, sem limite de tentativas
+— é aceitável só enquanto o alcance é uma LAN ou um tailnet. Antes de o servidor
+público ir ao ar, a senha precisa crescer e o host precisa recuar após
+tentativas seguidas. Ver R? na lista de riscos.
 
 ### D7 — Criptografia ponta a ponta, com verificação de identidade  ✅ IMPLEMENTADO
 
