@@ -86,7 +86,8 @@ const BACKOFF_CEGO: Duration = Duration::from_millis(50);
 const SCAN_CTRL: u32 = 0x1D;
 const SCAN_ALT: u32 = 0x38;
 const SCAN_END: u32 = 0x4F;
-const SCAN_F: u32 = 0x21;
+const SCAN_F: u32 = 0x21; // enviar arquivo ao host (Ctrl+Alt+F)
+const SCAN_G: u32 = 0x22; // pedir arquivo ao host, para baixar (Ctrl+Alt+G)
 
 /// Base de tempo comum. Só faz sentido no modo de processo único.
 static START: OnceLock<Instant> = OnceLock::new();
@@ -852,6 +853,15 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
     let mut seq = 0u64;
     let mut stats = HostStats::default();
     let mut receptor = ReceptorArquivo::novo();
+
+    // Download (host→viewer): quando o viewer pede um arquivo (`RequestFile`),
+    // o diálogo de escolha abre **numa thread à parte** para o laço de captura
+    // não parar — assim o operador vê o próprio diálogo pela sessão e escolhe
+    // por controle remoto. O caminho escolhido volta por este canal.
+    let (tx_arquivo, rx_arquivo) = std::sync::mpsc::channel::<Option<String>>();
+    let mut remetente: Option<RemetenteArquivo> = None;
+    let mut dialogo_aberto = false;
+
     let mut next_report = Instant::now() + Duration::from_secs(2);
 
     let frame_period = Duration::from_micros(1_000_000 / fps() as u64);
@@ -881,8 +891,35 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
                 Ok(Message::FileOffer { name, size }) => receptor.oferta(&name, size),
                 Ok(Message::FileChunk { data }) => receptor.pedaco(&data),
                 Ok(Message::FileEnd) => receptor.fim(),
+                Ok(Message::RequestFile) => {
+                    // Um pedido por vez: ignora repetições enquanto o diálogo
+                    // está aberto ou um envio está em curso, para não abrir
+                    // várias janelas nem truncar a transferência anterior.
+                    if !dialogo_aberto && remetente.is_none() {
+                        dialogo_aberto = true;
+                        let tx = tx_arquivo.clone();
+                        std::thread::spawn(move || {
+                            let _ = tx.send(escolher_arquivo());
+                        });
+                    }
+                }
                 Ok(_) | Err(_) => {}
             }
+        }
+
+        // ---- resultado do diálogo de download e um passo do envio
+        // Fora do laço de mensagens de propósito: precisa rodar em toda volta,
+        // inclusive nas que a captura aborta com `continue` (tela ociosa, cega).
+        if let Ok(escolha) = rx_arquivo.try_recv() {
+            dialogo_aberto = false;
+            if let Some(caminho) = escolha {
+                remetente = RemetenteArquivo::abrir(&caminho);
+            }
+        }
+        if let Some(r) = remetente.as_mut()
+            && !r.passo(&mut t)
+        {
+            remetente = None;
         }
 
         // ---- captura
@@ -1012,7 +1049,8 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
 /// o disco da máquina controlada.
 const MAX_ARQUIVO: u64 = 2 * 1024 * 1024 * 1024; // 2 GB
 
-/// Recebe um arquivo enviado pelo viewer e o grava em disco.
+/// Recebe um arquivo e o grava em disco. Serve às duas direções: o host o usa
+/// para o que o viewer envia, o viewer para o que baixa do host.
 ///
 /// # O cuidado que não é opcional
 ///
@@ -1022,9 +1060,9 @@ const MAX_ARQUIVO: u64 = 2 * 1024 * 1024 * 1024; // 2 GB
 /// também não sobrescreve: se já existe um arquivo com o nome, acrescenta um
 /// sufixo numérico.
 ///
-/// **Aceita sem perguntar, por ora.** Isto é v1: os dois lados se
-/// autenticaram por senha. Um produto deve confirmar com o usuário antes de
-/// gravar — anotado, não implementado aqui.
+/// **Aceita sem perguntar.** Os dois lados se autenticaram por senha, e o
+/// operador pediu para dispensar a confirmação na ponta remota. Um produto
+/// pode oferecer essa confirmação como opção — anotado, não imposto aqui.
 struct ReceptorArquivo {
     arquivo: Option<std::io::BufWriter<std::fs::File>>,
     caminho: std::path::PathBuf,
@@ -1045,7 +1083,7 @@ impl ReceptorArquivo {
     fn oferta(&mut self, nome: &str, tamanho: u64) {
         if tamanho > MAX_ARQUIVO {
             eprintln!(
-                "host: recusando '{nome}': {tamanho} bytes acima do teto de {MAX_ARQUIVO}"
+                "arquivo: recusando '{nome}': {tamanho} bytes acima do teto de {MAX_ARQUIVO}"
             );
             return;
         }
@@ -1055,13 +1093,13 @@ impl ReceptorArquivo {
 
         match std::fs::File::create(&caminho) {
             Ok(f) => {
-                println!("host: recebendo '{}' ({} bytes)...", caminho.display(), tamanho);
+                println!("arquivo: recebendo '{}' ({} bytes)...", caminho.display(), tamanho);
                 self.arquivo = Some(std::io::BufWriter::new(f));
                 self.caminho = caminho;
                 self.esperado = tamanho;
                 self.recebido = 0;
             }
-            Err(e) => eprintln!("host: não consegui criar '{}': {e}", caminho.display()),
+            Err(e) => eprintln!("arquivo: não consegui criar '{}': {e}", caminho.display()),
         }
     }
 
@@ -1071,13 +1109,13 @@ impl ReceptorArquivo {
         // Um peer que mande mais do que ofereceu é encerrado aqui, não deixado
         // escrever à vontade.
         if self.recebido + dados.len() as u64 > self.esperado {
-            eprintln!("host: transferência excedeu o tamanho ofertado; abortando");
+            eprintln!("arquivo: transferência excedeu o tamanho ofertado; abortando");
             self.arquivo = None;
             let _ = std::fs::remove_file(&self.caminho);
             return;
         }
         if f.write_all(dados).is_err() {
-            eprintln!("host: erro gravando o arquivo; abortando");
+            eprintln!("arquivo: erro gravando o arquivo; abortando");
             self.arquivo = None;
             return;
         }
@@ -1089,7 +1127,7 @@ impl ReceptorArquivo {
         let Some(mut f) = self.arquivo.take() else { return };
         let _ = f.flush();
         println!(
-            "host: ARQUIVO RECEBIDO — '{}' ({} de {} bytes)",
+            "arquivo: ARQUIVO RECEBIDO — '{}' ({} de {} bytes)",
             self.caminho.display(),
             self.recebido,
             self.esperado
@@ -1185,7 +1223,7 @@ struct RemetenteArquivo {
 impl RemetenteArquivo {
     fn abrir(caminho: &str) -> Option<Self> {
         let arq = std::fs::File::open(caminho)
-            .inspect_err(|e| eprintln!("viewer: não consegui abrir '{caminho}': {e}"))
+            .inspect_err(|e| eprintln!("arquivo: não consegui abrir '{caminho}': {e}"))
             .ok()?;
         let tamanho = arq.metadata().ok()?.len();
         let nome = std::path::Path::new(caminho)
@@ -1193,7 +1231,7 @@ impl RemetenteArquivo {
             .and_then(|s| s.to_str())
             .unwrap_or("arquivo")
             .to_string();
-        println!("viewer: enviando '{nome}' ({tamanho} bytes)...");
+        println!("arquivo: enviando '{nome}' ({tamanho} bytes)...");
         Some(Self {
             leitor: std::io::BufReader::new(arq),
             nome,
@@ -1220,7 +1258,7 @@ impl RemetenteArquivo {
         if self.restante == 0 {
             let m = Message::FileEnd;
             let _ = t.send(m.channel(), &m.encode());
-            println!("viewer: '{}' enviado.", self.nome);
+            println!("arquivo: '{}' enviado.", self.nome);
             return false;
         }
         let n = (self.restante as usize).min(PEDACO_ARQUIVO);
@@ -1241,7 +1279,7 @@ impl RemetenteArquivo {
                 true
             }
             Err(e) => {
-                eprintln!("viewer: erro lendo o arquivo: {e}");
+                eprintln!("arquivo: erro lendo o arquivo: {e}");
                 false
             }
         }
@@ -1385,6 +1423,10 @@ fn run_viewer<T: Transport>(mut t: T) {
     // É a via testável do v1; o atalho com seletor de arquivo vem depois.
     let mut remetente = arg_value("--send-file").and_then(|p| RemetenteArquivo::abrir(&p));
 
+    // Recebe arquivos baixados do host (resposta a um `RequestFile`), gravados
+    // em `Downloads\PCShare` desta máquina.
+    let mut receptor = ReceptorArquivo::novo();
+
     let mut rgb = Vec::new();
     let mut frames = 0u64;
     let mut stale = 0u64;
@@ -1490,6 +1532,25 @@ fn run_viewer<T: Transport>(mut t: T) {
                         }
                         continue;
                     }
+                    // Ctrl+Alt+G: pedir ao host um arquivo para baixar. O
+                    // diálogo abre lá, e o operador o opera por controle remoto.
+                    if down && scancode & 0xFF == SCAN_G && ctrl_pressionado && alt_pressionado {
+                        // Solta Ctrl e Alt no host, como no Ctrl+Alt+F: senão as
+                        // teclas ficam grudadas lá enquanto o operador digita o
+                        // nome do arquivo no diálogo remoto.
+                        for solto in [SCAN_CTRL, SCAN_ALT] {
+                            let m = Message::Input(InputEvent::Key { scancode: solto, down: false });
+                            let _ = t.send(m.channel(), &m.encode());
+                        }
+                        ctrl_pressionado = false;
+                        alt_pressionado = false;
+                        let m = Message::RequestFile;
+                        if t.send(m.channel(), &m.encode()).is_err() {
+                            return;
+                        }
+                        println!("viewer: pedido de download enviado ao host (Ctrl+Alt+G)");
+                        continue;
+                    }
                     InputEvent::Key { scancode, down }
                 }
             };
@@ -1516,6 +1577,10 @@ fn run_viewer<T: Transport>(mut t: T) {
                     Ok(Message::Pong { sent_us, .. }) => {
                         rtt_ms.push((now_us() - sent_us) as f64 / 1000.0);
                     }
+                    // Download vindo do host, gravado localmente.
+                    Ok(Message::FileOffer { name, size }) => receptor.oferta(&name, size),
+                    Ok(Message::FileChunk { data }) => receptor.pedaco(&data),
+                    Ok(Message::FileEnd) => receptor.fim(),
                     Ok(_) => {}
                     Err(e) => eprintln!("viewer: mensagem inválida: {e}"),
                 },

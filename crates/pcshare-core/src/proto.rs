@@ -95,6 +95,13 @@ pub enum Message {
     FileChunk { data: Vec<u8> },
     /// Fim do arquivo. O receptor fecha o que estava gravando.
     FileEnd,
+    /// Viewer → host: quero copiar um arquivo **daí**. Abra o seletor.
+    ///
+    /// O host abre o diálogo de arquivo na própria tela — que o operador já
+    /// está vendo e controlando pelo viewer — e devolve o arquivo escolhido
+    /// pelas mesmas mensagens `FileOffer`/`FileChunk`/`FileEnd`, agora no
+    /// sentido host → viewer.
+    RequestFile,
 }
 
 const TAG_HELLO: u8 = 0x01;
@@ -107,6 +114,7 @@ const TAG_REQUEST_SAS: u8 = 0x07;
 const TAG_FILE_OFFER: u8 = 0x08;
 const TAG_FILE_CHUNK: u8 = 0x09;
 const TAG_FILE_END: u8 = 0x0A;
+const TAG_REQUEST_FILE: u8 = 0x0B;
 
 const IN_MOUSE_MOVE: u8 = 0x01;
 const IN_MOUSE_BUTTON: u8 = 0x02;
@@ -163,6 +171,7 @@ impl Message {
                 b.extend_from_slice(data);
             }
             Message::FileEnd => b.push(TAG_FILE_END),
+            Message::RequestFile => b.push(TAG_REQUEST_FILE),
             Message::Input(ev) => {
                 b.push(TAG_INPUT);
                 encode_input(&mut b, ev);
@@ -218,6 +227,7 @@ impl Message {
                 }
             }
             TAG_FILE_END => Message::FileEnd,
+            TAG_REQUEST_FILE => Message::RequestFile,
             TAG_INPUT => Message::Input(decode_input(&mut r)?),
             TAG_PING => Message::Ping {
                 nonce: r.u64()?,
@@ -384,6 +394,7 @@ mod tests {
             data: vec![0, 1, 2, 250, 255],
         });
         roundtrip(Message::FileEnd);
+        roundtrip(Message::RequestFile);
         roundtrip(Message::Ping {
             nonce: 7,
             sent_us: 123456789,
