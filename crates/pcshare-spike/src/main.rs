@@ -86,6 +86,7 @@ const BACKOFF_CEGO: Duration = Duration::from_millis(50);
 const SCAN_CTRL: u32 = 0x1D;
 const SCAN_ALT: u32 = 0x38;
 const SCAN_END: u32 = 0x4F;
+const SCAN_F: u32 = 0x21;
 
 /// Base de tempo comum. Só faz sentido no modo de processo único.
 static START: OnceLock<Instant> = OnceLock::new();
@@ -1133,6 +1134,36 @@ fn caminho_sem_colisao(dir: &std::path::Path, nome_cru: &str) -> std::path::Path
     primeiro // desistência improvável; sobrescreve
 }
 
+/// Abre o diálogo padrão do Windows para o operador escolher um arquivo.
+///
+/// Modal: enquanto está aberto, o laço do viewer não desenha — o vídeo pausa e
+/// volta assim que a escolha é feita. Para escolher um arquivo, é um custo
+/// aceitável.
+fn escolher_arquivo() -> Option<String> {
+    use windows::Win32::UI::Controls::Dialogs::{
+        GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY, OPENFILENAMEW,
+    };
+    use windows::core::PWSTR;
+
+    // Buffer que o diálogo preenche com o caminho escolhido. 32 KB comporta
+    // qualquer caminho do Windows com folga.
+    let mut buf = vec![0u16; 32 * 1024];
+    let mut ofn = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        lpstrFile: PWSTR(buf.as_mut_ptr()),
+        nMaxFile: buf.len() as u32,
+        Flags: OFN_FILEMUSTEXIST | OFN_HIDEREADONLY,
+        ..Default::default()
+    };
+
+    let escolheu = unsafe { GetOpenFileNameW(&mut ofn).as_bool() };
+    if !escolheu {
+        return None; // o operador cancelou
+    }
+    let fim = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Some(String::from_utf16_lossy(&buf[..fim]))
+}
+
 /// Tamanho de cada pedaço enviado. Pequeno de propósito: o arquivo trafega
 /// pelo mesmo canal de controle que a entrada, e um pedaço por volta do laço
 /// deixa os cliques passarem entre eles, em vez de a transferência travar o
@@ -1439,6 +1470,24 @@ fn run_viewer<T: Transport>(mut t: T) {
                         println!("viewer: Ctrl+Alt+Del enviado ao host");
                         // Não repassa as teclas: o host receberia um End solto
                         // no meio da sequência.
+                        continue;
+                    }
+                    // Ctrl+Alt+F: escolher um arquivo e enviá-lo ao host.
+                    if down && scancode & 0xFF == SCAN_F && ctrl_pressionado && alt_pressionado {
+                        // Solta Ctrl e Alt no host antes de abrir o diálogo: ele
+                        // recebeu os "down" e, sem os "up" (que vão para o
+                        // diálogo, não para cá), ficaria com as teclas grudadas.
+                        for solto in [SCAN_CTRL, SCAN_ALT] {
+                            let m = Message::Input(InputEvent::Key { scancode: solto, down: false });
+                            let _ = t.send(m.channel(), &m.encode());
+                        }
+                        ctrl_pressionado = false;
+                        alt_pressionado = false;
+                        // O diálogo é modal: o vídeo pausa enquanto ele está
+                        // aberto e volta assim que o arquivo é escolhido.
+                        if let Some(caminho) = escolher_arquivo() {
+                            remetente = RemetenteArquivo::abrir(&caminho);
+                        }
                         continue;
                     }
                     InputEvent::Key { scancode, down }
