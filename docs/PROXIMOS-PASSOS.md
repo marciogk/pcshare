@@ -151,11 +151,31 @@ no viewer, `--encontro <servidor> --id <id>`.
    > limitada de propósito. Estreitar por origem exige o encontro repassar o IP
    > do viewer — refinamento anotado, não bloqueante.
 
-2. **Provisionar o servidor de encontro público** 🔴 e testar entre redes
-   reais. Decisão de hospedagem adiada até aqui, de propósito. É o próximo.
+2. **Servidor de encontro público** ✅ 11/09/2026. Compilado no VPS do usuário
+   (Ubuntu, Integrator Host, `198.50.117.107`) e testado **entre dois locais
+   pela internet aberta**: máquina remota registra pelo ID, viewer aqui
+   conecta pelo ID, vê e **controla**, sem VPN nem porta aberta na ponta
+   remota. É a AnyDesk na infraestrutura do próprio usuário.
+
+   Só o `pcshare-encontro` foi ao VPS (crate limpo para Linux; não arrasta o
+   `windows`). Build no VPS via `cargo build -p pcshare-encontro`; firewall
+   `ufw allow 7100/udp`. Três armadilhas do teste, para lembrar:
+   - `scp` não estava no PATH do PowerShell — está no Git (`Git Bash`).
+   - **hall de espelhos**: viewer nas duas máquinas apontando um para o outro
+     dá recursão infinita e o controle briga (cada lado empurra o mouse de
+     volta). Uma direção só por vez.
+   - **nitidez**: a remota era 1920×1080 e o monitor deste PC é 1360×768 → a
+     imagem encolhia e borrava. Baixar a resolução da remota resolveu. Não é
+     defeito do PCShare — é o monitor pequeno da máquina de dev.
+
 3. **Furo de NAT** 🟡 otimização. O servidor informa a cada lado o endereço do
    outro; os dois furam o NAT e a sessão vira direta, tirando o vídeo do relay.
    O relay continua como plano B. Reduz o custo variável de banda da D6.
+4. **Auto-resolução** 🟢 refinamento de produto, saído deste teste. O viewer
+   poderia pedir ao host para capturar já na resolução da janela — aí a nitidez
+   fica ótima em qualquer monitor sem o usuário baixar a resolução do remoto na
+   mão, como a AnyDesk faz. Também eliminaria o gasto de codificar pixels que o
+   viewer vai encolher.
 
 
 ### 1. Medir a arquitetura nova 🟡 imagem e latência feitas; falta o UAC
