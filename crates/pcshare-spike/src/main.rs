@@ -850,6 +850,7 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
     let mut nv12 = Vec::new();
     let mut seq = 0u64;
     let mut stats = HostStats::default();
+    let mut receptor = ReceptorArquivo::novo();
     let mut next_report = Instant::now() + Duration::from_secs(2);
 
     let frame_period = Duration::from_micros(1_000_000 / fps() as u64);
@@ -876,6 +877,9 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
                     enc.request_keyframe();
                     stats.keyframe_requests += 1;
                 }
+                Ok(Message::FileOffer { name, size }) => receptor.oferta(&name, size),
+                Ok(Message::FileChunk { data }) => receptor.pedaco(&data),
+                Ok(Message::FileEnd) => receptor.fim(),
                 Ok(_) | Err(_) => {}
             }
         }
@@ -998,6 +1002,217 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
                 stats.report(&t);
             }
             next_report += Duration::from_secs(2);
+        }
+    }
+}
+
+/// Teto de um arquivo recebido. Um peer autenticado não deveria ser hostil,
+/// mas "não deveria" não é garantia: sem o teto, um peer comprometido encheria
+/// o disco da máquina controlada.
+const MAX_ARQUIVO: u64 = 2 * 1024 * 1024 * 1024; // 2 GB
+
+/// Recebe um arquivo enviado pelo viewer e o grava em disco.
+///
+/// # O cuidado que não é opcional
+///
+/// O nome vem da rede, e é reduzido ao **nome-base** antes de virar caminho.
+/// Aceitar `..\..\Windows\System32\algo.dll` seria deixar o outro lado
+/// escrever onde quisesse — a brecha clássica de path traversal. O receptor
+/// também não sobrescreve: se já existe um arquivo com o nome, acrescenta um
+/// sufixo numérico.
+///
+/// **Aceita sem perguntar, por ora.** Isto é v1: os dois lados se
+/// autenticaram por senha. Um produto deve confirmar com o usuário antes de
+/// gravar — anotado, não implementado aqui.
+struct ReceptorArquivo {
+    arquivo: Option<std::io::BufWriter<std::fs::File>>,
+    caminho: std::path::PathBuf,
+    esperado: u64,
+    recebido: u64,
+}
+
+impl ReceptorArquivo {
+    fn novo() -> Self {
+        Self {
+            arquivo: None,
+            caminho: std::path::PathBuf::new(),
+            esperado: 0,
+            recebido: 0,
+        }
+    }
+
+    fn oferta(&mut self, nome: &str, tamanho: u64) {
+        if tamanho > MAX_ARQUIVO {
+            eprintln!(
+                "host: recusando '{nome}': {tamanho} bytes acima do teto de {MAX_ARQUIVO}"
+            );
+            return;
+        }
+        let destino = pasta_de_recebidos();
+        let _ = std::fs::create_dir_all(&destino);
+        let caminho = caminho_sem_colisao(&destino, nome);
+
+        match std::fs::File::create(&caminho) {
+            Ok(f) => {
+                println!("host: recebendo '{}' ({} bytes)...", caminho.display(), tamanho);
+                self.arquivo = Some(std::io::BufWriter::new(f));
+                self.caminho = caminho;
+                self.esperado = tamanho;
+                self.recebido = 0;
+            }
+            Err(e) => eprintln!("host: não consegui criar '{}': {e}", caminho.display()),
+        }
+    }
+
+    fn pedaco(&mut self, dados: &[u8]) {
+        use std::io::Write;
+        let Some(f) = self.arquivo.as_mut() else { return };
+        // Um peer que mande mais do que ofereceu é encerrado aqui, não deixado
+        // escrever à vontade.
+        if self.recebido + dados.len() as u64 > self.esperado {
+            eprintln!("host: transferência excedeu o tamanho ofertado; abortando");
+            self.arquivo = None;
+            let _ = std::fs::remove_file(&self.caminho);
+            return;
+        }
+        if f.write_all(dados).is_err() {
+            eprintln!("host: erro gravando o arquivo; abortando");
+            self.arquivo = None;
+            return;
+        }
+        self.recebido += dados.len() as u64;
+    }
+
+    fn fim(&mut self) {
+        use std::io::Write;
+        let Some(mut f) = self.arquivo.take() else { return };
+        let _ = f.flush();
+        println!(
+            "host: ARQUIVO RECEBIDO — '{}' ({} de {} bytes)",
+            self.caminho.display(),
+            self.recebido,
+            self.esperado
+        );
+    }
+}
+
+/// Onde os arquivos recebidos são gravados: `Downloads\PCShare`.
+fn pasta_de_recebidos() -> std::path::PathBuf {
+    let base = std::env::var("USERPROFILE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    base.join("Downloads").join("PCShare")
+}
+
+/// Reduz o nome ao nome-base e resolve colisão com sufixo numérico.
+fn caminho_sem_colisao(dir: &std::path::Path, nome_cru: &str) -> std::path::PathBuf {
+    // `file_name` descarta qualquer componente de diretório. Se sobrar algo
+    // vazio ou `..`, cai num nome neutro em vez de arriscar.
+    let base = std::path::Path::new(nome_cru)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty() && *s != "..")
+        .unwrap_or("arquivo-recebido");
+
+    let primeiro = dir.join(base);
+    if !primeiro.exists() {
+        return primeiro;
+    }
+    let p = std::path::Path::new(base);
+    let tronco = p.file_stem().and_then(|s| s.to_str()).unwrap_or(base);
+    let ext = p.extension().and_then(|s| s.to_str());
+    for n in 1..10_000 {
+        let tentativa = match ext {
+            Some(e) => dir.join(format!("{tronco} ({n}).{e}")),
+            None => dir.join(format!("{tronco} ({n})")),
+        };
+        if !tentativa.exists() {
+            return tentativa;
+        }
+    }
+    primeiro // desistência improvável; sobrescreve
+}
+
+/// Tamanho de cada pedaço enviado. Pequeno de propósito: o arquivo trafega
+/// pelo mesmo canal de controle que a entrada, e um pedaço por volta do laço
+/// deixa os cliques passarem entre eles, em vez de a transferência travar o
+/// controle. É a mesma lógica de intercalar que o resto do laço já usa.
+const PEDACO_ARQUIVO: usize = 64 * 1024;
+
+/// Envia um arquivo local ao host, um pedaço por vez.
+///
+/// O ritmo — um passo por volta do laço do viewer — é o ponto: a entrada
+/// continua fluindo enquanto o arquivo sobe. Uma transferência que congelasse
+/// o mouse seria pior que uma lenta.
+struct RemetenteArquivo {
+    leitor: std::io::BufReader<std::fs::File>,
+    nome: String,
+    restante: u64,
+    ofertou: bool,
+}
+
+impl RemetenteArquivo {
+    fn abrir(caminho: &str) -> Option<Self> {
+        let arq = std::fs::File::open(caminho)
+            .inspect_err(|e| eprintln!("viewer: não consegui abrir '{caminho}': {e}"))
+            .ok()?;
+        let tamanho = arq.metadata().ok()?.len();
+        let nome = std::path::Path::new(caminho)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("arquivo")
+            .to_string();
+        println!("viewer: enviando '{nome}' ({tamanho} bytes)...");
+        Some(Self {
+            leitor: std::io::BufReader::new(arq),
+            nome,
+            restante: tamanho,
+            ofertou: false,
+        })
+    }
+
+    /// Faz um passo: a oferta na primeira vez, depois um pedaço por chamada.
+    /// Devolve `false` quando não há mais nada a enviar.
+    fn passo<T: Transport>(&mut self, t: &mut T) -> bool {
+        use std::io::Read;
+        if !self.ofertou {
+            let m = Message::FileOffer {
+                name: self.nome.clone(),
+                size: self.restante,
+            };
+            if t.send(m.channel(), &m.encode()).is_err() {
+                return false;
+            }
+            self.ofertou = true;
+            return true;
+        }
+        if self.restante == 0 {
+            let m = Message::FileEnd;
+            let _ = t.send(m.channel(), &m.encode());
+            println!("viewer: '{}' enviado.", self.nome);
+            return false;
+        }
+        let n = (self.restante as usize).min(PEDACO_ARQUIVO);
+        let mut buf = vec![0u8; n];
+        match self.leitor.read(&mut buf) {
+            Ok(0) => {
+                // Fim inesperado do arquivo: encerra com o que foi.
+                self.restante = 0;
+                true
+            }
+            Ok(lidos) => {
+                buf.truncate(lidos);
+                let m = Message::FileChunk { data: buf };
+                if t.send(m.channel(), &m.encode()).is_err() {
+                    return false;
+                }
+                self.restante -= lidos as u64;
+                true
+            }
+            Err(e) => {
+                eprintln!("viewer: erro lendo o arquivo: {e}");
+                false
+            }
         }
     }
 }
@@ -1135,6 +1350,10 @@ fn run_viewer<T: Transport>(mut t: T) {
     let mut ctrl_pressionado = false;
     let mut alt_pressionado = false;
 
+    // `--send-file <caminho>`: envia um arquivo ao host assim que a sessão sobe.
+    // É a via testável do v1; o atalho com seletor de arquivo vem depois.
+    let mut remetente = arg_value("--send-file").and_then(|p| RemetenteArquivo::abrir(&p));
+
     let mut rgb = Vec::new();
     let mut frames = 0u64;
     let mut stale = 0u64;
@@ -1157,6 +1376,13 @@ fn run_viewer<T: Transport>(mut t: T) {
             break;
         }
         let mut got_any = false;
+
+        // ---- um passo do envio de arquivo, se houver um em curso
+        if let Some(r) = remetente.as_mut()
+            && !r.passo(&mut t)
+        {
+            remetente = None;
+        }
 
         // ---- sondagem de latência, válida entre máquinas quaisquer
         if Instant::now() >= next_ping {

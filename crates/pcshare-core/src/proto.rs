@@ -84,6 +84,17 @@ pub enum Message {
     /// garante ao usuário que a tela de senha é a verdadeira. Gerá-la exige
     /// `SendSAS`, que só o serviço pode chamar — daí a mensagem separada.
     RequestSAS,
+    /// Início de uma transferência de arquivo: nome e tamanho total.
+    ///
+    /// Vai pelo canal de controle, que é confiável e ordenado — um pedaço
+    /// perdido ou fora de ordem corromperia o arquivo em silêncio. O `nome` é
+    /// reduzido ao nome-base pelo receptor antes de gravar: aceitar um caminho
+    /// vindo da rede seria deixar o outro lado escrever onde quisesse.
+    FileOffer { name: String, size: u64 },
+    /// Um pedaço do arquivo em transferência, na ordem em que sai.
+    FileChunk { data: Vec<u8> },
+    /// Fim do arquivo. O receptor fecha o que estava gravando.
+    FileEnd,
 }
 
 const TAG_HELLO: u8 = 0x01;
@@ -93,6 +104,9 @@ const TAG_INPUT: u8 = 0x04;
 const TAG_PING: u8 = 0x05;
 const TAG_PONG: u8 = 0x06;
 const TAG_REQUEST_SAS: u8 = 0x07;
+const TAG_FILE_OFFER: u8 = 0x08;
+const TAG_FILE_CHUNK: u8 = 0x09;
+const TAG_FILE_END: u8 = 0x0A;
 
 const IN_MOUSE_MOVE: u8 = 0x01;
 const IN_MOUSE_BUTTON: u8 = 0x02;
@@ -134,6 +148,21 @@ impl Message {
             }
             Message::RequestKeyframe => b.push(TAG_REQUEST_KEYFRAME),
             Message::RequestSAS => b.push(TAG_REQUEST_SAS),
+            Message::FileOffer { name, size } => {
+                let nome = name.as_bytes();
+                b.reserve(nome.len() + 16);
+                b.push(TAG_FILE_OFFER);
+                put_u32(&mut b, nome.len() as u32);
+                b.extend_from_slice(nome);
+                put_u64(&mut b, *size);
+            }
+            Message::FileChunk { data } => {
+                b.reserve(data.len() + 8);
+                b.push(TAG_FILE_CHUNK);
+                put_u32(&mut b, data.len() as u32);
+                b.extend_from_slice(data);
+            }
+            Message::FileEnd => b.push(TAG_FILE_END),
             Message::Input(ev) => {
                 b.push(TAG_INPUT);
                 encode_input(&mut b, ev);
@@ -174,6 +203,21 @@ impl Message {
             }
             TAG_REQUEST_KEYFRAME => Message::RequestKeyframe,
             TAG_REQUEST_SAS => Message::RequestSAS,
+            TAG_FILE_OFFER => {
+                let len = r.u32()? as usize;
+                let nome = String::from_utf8_lossy(r.bytes(len)?).into_owned();
+                Message::FileOffer {
+                    name: nome,
+                    size: r.u64()?,
+                }
+            }
+            TAG_FILE_CHUNK => {
+                let len = r.u32()? as usize;
+                Message::FileChunk {
+                    data: r.bytes(len)?.to_vec(),
+                }
+            }
+            TAG_FILE_END => Message::FileEnd,
             TAG_INPUT => Message::Input(decode_input(&mut r)?),
             TAG_PING => Message::Ping {
                 nonce: r.u64()?,
@@ -332,6 +376,14 @@ mod tests {
         });
         roundtrip(Message::RequestKeyframe);
         roundtrip(Message::RequestSAS);
+        roundtrip(Message::FileOffer {
+            name: "relatório final.pdf".into(),
+            size: 1_234_567,
+        });
+        roundtrip(Message::FileChunk {
+            data: vec![0, 1, 2, 250, 255],
+        });
+        roundtrip(Message::FileEnd);
         roundtrip(Message::Ping {
             nonce: 7,
             sent_us: 123456789,
