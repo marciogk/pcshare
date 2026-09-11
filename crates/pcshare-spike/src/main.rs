@@ -49,7 +49,21 @@ fn fps() -> u32 {
         .filter(|v| (1..=120).contains(v))
         .unwrap_or(60)
 }
-const BITRATE: u32 = 8_000_000;
+/// Taxa de bits do H.264, em bits por segundo, sobreponível por
+/// `PCSHARE_BITRATE` (em Mbps).
+///
+/// Subiu de 8 para 12 Mbps como padrão em 10/09/2026: 8 bastavam na LAN, mas
+/// texto de desktop — bordas finas de alta frequência — pede mais bits para
+/// não sair borrado, e num link rápido (LAN, Tailscale) sobra folga. É o host
+/// quem codifica, então esta variável se define na máquina **controlada**.
+fn bitrate() -> u32 {
+    std::env::var("PCSHARE_BITRATE")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|v| (1..=100).contains(v))
+        .map(|mbps| mbps * 1_000_000)
+        .unwrap_or(12_000_000)
+}
 /// Espera máxima por um frame novo. É espera bloqueante em evento (decisão
 /// D8), mas limitada para que o mesmo laço também atenda o transporte.
 const CAPTURE_TIMEOUT_MS: u32 = 8;
@@ -803,9 +817,9 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
     println!("host: capturando {w}x{h}");
 
     let mut enc = if force_cpu {
-        H264Encoder::new(w, h, fps(), BITRATE)?
+        H264Encoder::new(w, h, fps(), bitrate())?
     } else {
-        H264Encoder::with_gpu(&gpu, w, h, fps(), BITRATE)?
+        H264Encoder::with_gpu(&gpu, w, h, fps(), bitrate())?
     };
     println!("host: encoder [{}] ({})", enc.name(), enc.tuning().join(", "));
 

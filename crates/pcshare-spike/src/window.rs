@@ -16,8 +16,8 @@ use pcshare_core::MouseButton;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLACK_BRUSH, DIB_RGB_COLORS, FillRect, GdiFlush, GetDC,
-    GetStockObject, HBRUSH, HDC, InvalidateRect, ReleaseDC, SRCCOPY, StretchDIBits, ValidateRect,
-    WHITE_BRUSH,
+    GetStockObject, HALFTONE, HBRUSH, HDC, InvalidateRect, ReleaseDC, SRCCOPY, SetBrushOrgEx,
+    SetStretchBltMode, StretchDIBits, ValidateRect, WHITE_BRUSH,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -173,6 +173,14 @@ impl Window {
         };
 
         unsafe {
+            // Esticamento de qualidade. Sem isto, o Windows usa o modo grosseiro
+            // (`COLORONCOLOR`), que joga linhas e colunas fora ao encolher — e é
+            // o que borra o texto quando a tela do host é maior que a janela.
+            // `HALFTONE` faz média dos pixels; a Microsoft pede um
+            // `SetBrushOrgEx` logo depois, para o alinhamento do meio-tom não
+            // introduzir um leve deslocamento.
+            SetStretchBltMode(self.hdc, HALFTONE);
+            let _ = SetBrushOrgEx(self.hdc, 0, 0, None);
             StretchDIBits(
                 self.hdc,
                 0,
