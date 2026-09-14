@@ -896,11 +896,15 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
                     // está aberto ou um envio está em curso, para não abrir
                     // várias janelas nem truncar a transferência anterior.
                     if !dialogo_aberto && remetente.is_none() {
+                        println!("host: viewer pediu um arquivo — abrindo o seletor na tela desta máquina");
                         dialogo_aberto = true;
                         let tx = tx_arquivo.clone();
+                        // Sem janela dona (é console): passa None.
                         std::thread::spawn(move || {
-                            let _ = tx.send(escolher_arquivo());
+                            let _ = tx.send(escolher_arquivo(None));
                         });
+                    } else {
+                        println!("host: pedido de arquivo ignorado (seletor já aberto ou envio em curso)");
                     }
                 }
                 Ok(_) | Err(_) => {}
@@ -912,8 +916,12 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
         // inclusive nas que a captura aborta com `continue` (tela ociosa, cega).
         if let Ok(escolha) = rx_arquivo.try_recv() {
             dialogo_aberto = false;
-            if let Some(caminho) = escolha {
-                remetente = RemetenteArquivo::abrir(&caminho);
+            match escolha {
+                Some(caminho) => {
+                    println!("host: operador escolheu '{caminho}' — enviando ao viewer");
+                    remetente = RemetenteArquivo::abrir(&caminho);
+                }
+                None => println!("host: nenhum arquivo escolhido para baixar"),
             }
         }
         if let Some(r) = remetente.as_mut()
@@ -1174,29 +1182,50 @@ fn caminho_sem_colisao(dir: &std::path::Path, nome_cru: &str) -> std::path::Path
 
 /// Abre o diálogo padrão do Windows para o operador escolher um arquivo.
 ///
-/// Modal: enquanto está aberto, o laço do viewer não desenha — o vídeo pausa e
-/// volta assim que a escolha é feita. Para escolher um arquivo, é um custo
-/// aceitável.
-fn escolher_arquivo() -> Option<String> {
+/// Modal: enquanto está aberto, o laço não desenha — o vídeo pausa e volta
+/// assim que a escolha é feita. Para escolher um arquivo, é um custo aceitável.
+///
+/// `owner` é o handle da janela dona (como `isize`, para poder atravessar
+/// threads — o `HWND` cru não é `Send`). Com dono, o diálogo devolve o foco à
+/// janela ao fechar; sem, o viewer para de receber teclas depois. No host não
+/// há janela: passa-se `None`.
+fn escolher_arquivo(owner: Option<isize>) -> Option<String> {
+    use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::Controls::Dialogs::{
-        GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY, OPENFILENAMEW,
+        CommDlgExtendedError, GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY,
+        OFN_NOCHANGEDIR, OPENFILENAMEW,
     };
     use windows::core::PWSTR;
+
+    let dono = owner
+        .map(|h| HWND(h as *mut std::ffi::c_void))
+        .unwrap_or_default();
 
     // Buffer que o diálogo preenche com o caminho escolhido. 32 KB comporta
     // qualquer caminho do Windows com folga.
     let mut buf = vec![0u16; 32 * 1024];
     let mut ofn = OPENFILENAMEW {
         lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: dono,
         lpstrFile: PWSTR(buf.as_mut_ptr()),
         nMaxFile: buf.len() as u32,
-        Flags: OFN_FILEMUSTEXIST | OFN_HIDEREADONLY,
+        // OFN_NOCHANGEDIR: não deixa o diálogo trocar o diretório atual do
+        // processo, que confundiria caminhos relativos usados depois.
+        Flags: OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR,
         ..Default::default()
     };
 
     let escolheu = unsafe { GetOpenFileNameW(&mut ofn).as_bool() };
     if !escolheu {
-        return None; // o operador cancelou
+        // Distingue cancelamento de falha real: zero é cancelamento; qualquer
+        // outro código é erro do próprio diálogo, e sem isto ele some calado.
+        let err = unsafe { CommDlgExtendedError() };
+        if err.0 == 0 {
+            println!("seletor: operador cancelou");
+        } else {
+            eprintln!("seletor: GetOpenFileNameW falhou (CDERR=0x{:04X})", err.0);
+        }
+        return None;
     }
     let fim = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     Some(String::from_utf16_lossy(&buf[..fim]))
@@ -1526,8 +1555,11 @@ fn run_viewer<T: Transport>(mut t: T) {
                         ctrl_pressionado = false;
                         alt_pressionado = false;
                         // O diálogo é modal: o vídeo pausa enquanto ele está
-                        // aberto e volta assim que o arquivo é escolhido.
-                        if let Some(caminho) = escolher_arquivo() {
+                        // aberto e volta assim que o arquivo é escolhido. A
+                        // janela do viewer é a dona, para o foco (e os atalhos)
+                        // voltarem a ela ao fechar.
+                        let dono = win.as_ref().map(|w| w.hwnd().0 as isize);
+                        if let Some(caminho) = escolher_arquivo(dono) {
                             remetente = RemetenteArquivo::abrir(&caminho);
                         }
                         continue;

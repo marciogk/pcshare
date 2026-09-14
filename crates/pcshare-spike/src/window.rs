@@ -131,6 +131,13 @@ impl Window {
         EVENTS.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
     }
 
+    /// Handle da janela, para ser dono de diálogos modais (o seletor de
+    /// arquivo). Sem dono, o diálogo não devolve o foco à janela ao fechar, e o
+    /// viewer para de receber teclas depois — inclusive os próprios atalhos.
+    pub fn hwnd(&self) -> HWND {
+        self.hwnd
+    }
+
     /// Área cliente atual, para saber em que tamanho desenhar.
     pub fn client_size(&self) -> (i32, i32) {
         unsafe {
