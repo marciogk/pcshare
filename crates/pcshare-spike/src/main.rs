@@ -1500,8 +1500,36 @@ fn run_viewer<T: Transport>(mut t: T) {
         }
 
         // ---- entrada do usuário, de volta para o host
-        let (cw, ch) = win.as_ref().map_or((0, 0), |w| w.client_size());
+        let (cw, ch) = win.as_ref().map_or((0, 0), |w| w.video_size());
         for raw in win.as_mut().map(|w| w.take_input()).unwrap_or_default() {
+            // Botões da barra de ferramentas: mesmas ações dos atalhos, mas por
+            // clique — e sem depender de combinação que outro programa possa
+            // sequestrar (foi o que o AnyDesk fez com o Ctrl+Alt+F/G).
+            if let window::RawEvent::Command(cmd) = raw {
+                match cmd {
+                    window::SessionCmd::SendFile => {
+                        let dono = win.as_ref().map(|w| w.hwnd().0 as isize);
+                        if let Some(caminho) = escolher_arquivo(dono) {
+                            remetente = RemetenteArquivo::abrir(&caminho);
+                        }
+                    }
+                    window::SessionCmd::DownloadFile => {
+                        let m = Message::RequestFile;
+                        if t.send(m.channel(), &m.encode()).is_err() {
+                            return;
+                        }
+                        println!("viewer: pedido de download enviado ao host (barra)");
+                    }
+                    window::SessionCmd::CtrlAltDel => {
+                        let m = Message::RequestSAS;
+                        if t.send(m.channel(), &m.encode()).is_err() {
+                            return;
+                        }
+                        println!("viewer: Ctrl+Alt+Del enviado ao host (barra)");
+                    }
+                }
+                continue;
+            }
             let ev = match raw {
                 // A janela quase nunca tem o tamanho da tela remota. Mapear
                 // pela proporção é o que faz o cursor pousar onde o usuário
@@ -1519,6 +1547,9 @@ fn run_viewer<T: Transport>(mut t: T) {
                     InputEvent::MouseButton { button, down }
                 }
                 window::RawEvent::Wheel { delta } => InputEvent::MouseWheel { delta },
+                // Já tratado acima com `continue`; presente só para o match
+                // continuar exaustivo.
+                window::RawEvent::Command(_) => continue,
                 window::RawEvent::Key { scancode, down } => {
                     // Ctrl+Alt+End vira Ctrl+Alt+Del na máquina remota.
                     //

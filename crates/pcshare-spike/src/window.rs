@@ -8,18 +8,20 @@
 //! custo próprio, e ele **está incluído** no número glass-to-glass. O produto
 //! deve ficar abaixo do que medirmos aqui, não acima.
 
+use std::ffi::c_void;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use pcshare_core::MouseButton;
 
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLACK_BRUSH, DIB_RGB_COLORS, FillRect, GdiFlush, GetDC,
-    GetStockObject, HALFTONE, HBRUSH, HDC, InvalidateRect, ReleaseDC, SRCCOPY, SetBrushOrgEx,
-    SetStretchBltMode, StretchDIBits, ValidateRect, WHITE_BRUSH,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLACK_BRUSH, DEFAULT_GUI_FONT, DIB_RGB_COLORS, FillRect,
+    GdiFlush, GetDC, GetStockObject, HALFTONE, HBRUSH, HDC, InvalidateRect, LTGRAY_BRUSH,
+    ReleaseDC, SRCCOPY, SetBrushOrgEx, SetStretchBltMode, StretchDIBits, ValidateRect, WHITE_BRUSH,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
 
@@ -31,15 +33,40 @@ static CLOSED: AtomicBool = AtomicBool::new(false);
 /// Fila de entrada preenchida pelo `wndproc`, drenada por [`Window::take_input`].
 static EVENTS: Mutex<Vec<RawEvent>> = Mutex::new(Vec::new());
 
-/// Evento cru da janela. As coordenadas estão em **pixels da área cliente**;
-/// a conversão para pixels do host acontece em `main.rs`, onde as duas
-/// dimensões são conhecidas.
+/// Altura da barra de ferramentas no topo. O vídeo é desenhado **abaixo** dela,
+/// e as coordenadas do mouse são deslocadas por ela antes de virar entrada — de
+/// modo que o topo da barra não vira clique na máquina remota.
+const TOOLBAR_H: i32 = 40;
+
+/// Identificadores dos botões da barra, recebidos de volta em `WM_COMMAND`.
+const ID_ENVIAR: i32 = 1001;
+const ID_BAIXAR: i32 = 1002;
+const ID_SAS: i32 = 1003;
+
+/// Ação disparada por um botão da barra de ferramentas. A janela não age
+/// sozinha: enfileira a intenção, e o laço do viewer — que detém o transporte —
+/// a executa.
+#[derive(Debug, Clone, Copy)]
+pub enum SessionCmd {
+    /// Enviar um arquivo local ao host (o que o Ctrl+Alt+F faz).
+    SendFile,
+    /// Pedir um arquivo ao host para baixar (o que o Ctrl+Alt+G faz).
+    DownloadFile,
+    /// Mandar Ctrl+Alt+Del à máquina remota (o que o Ctrl+Alt+End faz).
+    CtrlAltDel,
+}
+
+/// Evento cru da janela. As coordenadas estão em **pixels da área de vídeo**
+/// (já descontada a barra); a conversão para pixels do host acontece em
+/// `main.rs`, onde as duas dimensões são conhecidas.
 #[derive(Debug, Clone, Copy)]
 pub enum RawEvent {
     Move { x: i32, y: i32 },
     Button { button: MouseButton, down: bool },
     Wheel { delta: i32 },
     Key { scancode: u32, down: bool },
+    /// Um botão da barra de ferramentas foi acionado.
+    Command(SessionCmd),
 }
 
 fn push(ev: RawEvent) {
@@ -97,7 +124,9 @@ impl Window {
                 WINDOW_EX_STYLE::default(),
                 class,
                 title,
-                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                // WS_CLIPCHILDREN: ao repintar o vídeo/barra, não desenhar por
+                // cima dos botões filhos — senão eles piscariam a cada quadro.
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
                 rect.right - rect.left,
@@ -107,6 +136,35 @@ impl Window {
                 Some(instance.into()),
                 None,
             )?;
+
+            // Botões da barra de ferramentas, como janelas-filhas nativas. A
+            // fonte padrão do sistema evita a fonte velha e grossa dos botões
+            // Win32 crus.
+            let hinst: HINSTANCE = instance.into();
+            let font = GetStockObject(DEFAULT_GUI_FONT);
+            let mut x = 8;
+            for (texto, id, largura) in [
+                (w!("Enviar arquivo"), ID_ENVIAR, 120),
+                (w!("Baixar arquivo"), ID_BAIXAR, 120),
+                (w!("Ctrl+Alt+Del"), ID_SAS, 110),
+            ] {
+                let botao = CreateWindowExW(
+                    WINDOW_EX_STYLE::default(),
+                    w!("BUTTON"),
+                    texto,
+                    WS_CHILD | WS_VISIBLE,
+                    x,
+                    6,
+                    largura,
+                    TOOLBAR_H - 12,
+                    Some(hwnd),
+                    Some(HMENU(id as usize as *mut c_void)),
+                    Some(hinst),
+                    None,
+                )?;
+                SendMessageW(botao, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1)));
+                x += largura + 6;
+            }
 
             CLOSED.store(false, Ordering::SeqCst);
             let hdc = GetDC(Some(hwnd));
@@ -138,7 +196,7 @@ impl Window {
         self.hwnd
     }
 
-    /// Área cliente atual, para saber em que tamanho desenhar.
+    /// Área cliente inteira, incluindo a barra de ferramentas.
     pub fn client_size(&self) -> (i32, i32) {
         unsafe {
             let mut r = RECT::default();
@@ -147,6 +205,13 @@ impl Window {
             }
             (r.right - r.left, r.bottom - r.top)
         }
+    }
+
+    /// Área só do vídeo (cliente menos a barra). É contra esta que o mouse é
+    /// mapeado, para o cursor pousar no ponto certo da tela remota.
+    pub fn video_size(&self) -> (i32, i32) {
+        let (cw, ch) = self.client_size();
+        (cw, (ch - TOOLBAR_H).max(0))
     }
 
     /// Desenha um quadro BGRA, escalando para a área cliente.
@@ -159,7 +224,8 @@ impl Window {
             return;
         }
         let (cw, ch) = self.client_size();
-        if cw <= 0 || ch <= 0 {
+        let vh = ch - TOOLBAR_H; // altura da área de vídeo
+        if cw <= 0 || vh <= 0 {
             return;
         }
 
@@ -186,14 +252,19 @@ impl Window {
             // `HALFTONE` faz média dos pixels; a Microsoft pede um
             // `SetBrushOrgEx` logo depois, para o alinhamento do meio-tom não
             // introduzir um leve deslocamento.
+            // Fundo da barra: cinza claro atrás e ao redor dos botões (que o
+            // WS_CLIPCHILDREN preserva). Sem isto, a faixa mostraria lixo.
+            let faixa = RECT { left: 0, top: 0, right: cw, bottom: TOOLBAR_H };
+            FillRect(self.hdc, &faixa, HBRUSH(GetStockObject(LTGRAY_BRUSH).0));
+
             SetStretchBltMode(self.hdc, HALFTONE);
             let _ = SetBrushOrgEx(self.hdc, 0, 0, None);
             StretchDIBits(
                 self.hdc,
                 0,
-                0,
+                TOOLBAR_H, // vídeo começa abaixo da barra
                 cw,
-                ch,
+                vh,
                 0,
                 0,
                 width,
@@ -330,11 +401,26 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 LRESULT(0)
             }
 
+            // Comando de um botão da barra. LOWORD(wParam) é o id do controle.
+            WM_COMMAND => {
+                match lo_word(wp.0 as isize) {
+                    ID_ENVIAR => push(RawEvent::Command(SessionCmd::SendFile)),
+                    ID_BAIXAR => push(RawEvent::Command(SessionCmd::DownloadFile)),
+                    ID_SAS => push(RawEvent::Command(SessionCmd::CtrlAltDel)),
+                    _ => {}
+                }
+                // Devolve o foco à janela de vídeo: senão o botão fica com o
+                // teclado e a digitação para de chegar à máquina remota — o
+                // mesmo tropeço do foco no seletor de arquivo.
+                let _ = SetFocus(Some(hwnd));
+                LRESULT(0)
+            }
+
             WM_MOUSEMOVE => {
-                push(RawEvent::Move {
-                    x: lo_word(lp.0),
-                    y: hi_word(lp.0),
-                });
+                let y = hi_word(lp.0) - TOOLBAR_H;
+                if y >= 0 {
+                    push(RawEvent::Move { x: lo_word(lp.0), y });
+                }
                 LRESULT(0)
             }
             WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN
@@ -347,14 +433,14 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     WM_MBUTTONDOWN => (MouseButton::Middle, true),
                     _ => (MouseButton::Middle, false),
                 };
-                // A posição vem junto com o clique: sem isso, um clique
-                // rápido depois de um movimento pode ser injetado na posição
-                // anterior do cursor.
-                push(RawEvent::Move {
-                    x: lo_word(lp.0),
-                    y: hi_word(lp.0),
-                });
-                push(RawEvent::Button { button, down });
+                let y = hi_word(lp.0) - TOOLBAR_H;
+                if y >= 0 {
+                    // A posição vem junto com o clique: sem isso, um clique
+                    // rápido depois de um movimento pode ser injetado na posição
+                    // anterior do cursor.
+                    push(RawEvent::Move { x: lo_word(lp.0), y });
+                    push(RawEvent::Button { button, down });
+                }
                 LRESULT(0)
             }
             WM_MOUSEWHEEL => {
