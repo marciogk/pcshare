@@ -35,7 +35,6 @@ use pcshare_core::quic::QuicListener;
 use pcshare_core::{
     Channel, Identity, InputEvent, Message, QuicTransport, TcpTransport, Transport,
 };
-use windows::core::w;
 
 /// Taxa alvo, sobreponível por `PCSHARE_FPS`.
 ///
@@ -130,23 +129,60 @@ pub fn identidade_local() -> Option<(String, String)> {
     Some((id.display_id(), id.fingerprint()))
 }
 
+/// Estágios de uma sessão, para a interface mostrar status ao vivo. Grosso de
+/// propósito: o pareamento e o fim são o que a pessoa precisa ver.
+#[derive(Debug, Clone)]
+pub enum Progresso {
+    /// Procurando a máquina pelo encontro.
+    Procurando,
+    /// Pareado e em sessão (o vídeo está na tela).
+    EmSessao,
+    /// A sessão terminou (janela fechada ou queda).
+    Encerrou,
+    /// Não deu para nem parear (ID errado, offline, ocupada).
+    Falhou(String),
+}
+
 /// Conecta a uma máquina pelo ID, pelo servidor de encontro, e roda a sessão do
 /// viewer (abre a janela e bloqueia até ela fechar). Feito para a interface
 /// chamar **numa thread**, no lugar de lançar o executável.
-pub fn assistir_por_id(encontro: SocketAddr, id: &str, senha: &str) -> std::io::Result<()> {
+///
+/// `titulo` vai para a barra de título da janela de sessão (o apelido da
+/// máquina, quando houver). `relatar` recebe cada mudança de estágio.
+pub fn assistir_por_id(
+    encontro: SocketAddr,
+    id: &str,
+    senha: &str,
+    titulo: &str,
+    mut relatar: impl FnMut(Progresso),
+) -> std::io::Result<()> {
     START.get_or_init(Instant::now);
     let identity = load_identity().map_err(erro_io)?;
-    let t = pcshare_encontro::conectar_por_id(encontro, id)?;
-    assistir(t, &identity, senha, false);
+    relatar(Progresso::Procurando);
+    let t = match pcshare_encontro::conectar_por_id(encontro, id) {
+        Ok(t) => t,
+        Err(e) => {
+            relatar(Progresso::Falhou(e.to_string()));
+            return Err(e);
+        }
+    };
+    relatar(Progresso::EmSessao);
+    assistir(t, &identity, senha, false, titulo);
+    relatar(Progresso::Encerrou);
     Ok(())
 }
 
 /// Registra esta máquina no encontro e atende sessões indefinidamente
 /// (compartilha esta tela). Também bloqueia — a interface chama numa thread.
-pub fn hospedar_por_id(encontro: SocketAddr, senha: &str) -> std::io::Result<()> {
+pub fn hospedar_por_id(
+    encontro: SocketAddr,
+    senha: &str,
+    mut relatar: impl FnMut(Progresso),
+) -> std::io::Result<()> {
     START.get_or_init(Instant::now);
     let identity = load_identity().map_err(erro_io)?;
     let meu_id = identity.display_id();
+    relatar(Progresso::EmSessao);
     atender(
         || pcshare_encontro::registrar_e_esperar(encontro, &meu_id),
         &identity,
@@ -245,7 +281,7 @@ pub fn run(args: Vec<String>) {
                 };
                 println!("procurando a máquina {id} pelo encontro {enc}");
                 match pcshare_encontro::conectar_por_id(enc, &id) {
-                    Ok(t) => assistir(t, &identity, &password, plaintext),
+                    Ok(t) => assistir(t, &identity, &password, plaintext, &format!("PCShare — {id}")),
                     // Mensagem clara em vez de pânico: aqui o erro é operacional
                     // (ID errado, máquina offline, ocupada), não um defeito.
                     Err(e) => eprintln!("não foi possível conectar: {e}"),
@@ -261,10 +297,10 @@ pub fn run(args: Vec<String>) {
             if quic {
                 let t = QuicTransport::connect(addr.parse().expect("endereço inválido"))
                     .expect("connect falhou");
-                assistir(t, &identity, &password, plaintext);
+                assistir(t, &identity, &password, plaintext, "PCShare — viewer");
             } else {
                 let t = TcpTransport::connect(&addr).expect("connect falhou");
-                assistir(t, &identity, &password, plaintext);
+                assistir(t, &identity, &password, plaintext, "PCShare — viewer");
             }
         }
         Some("latencia-captura") => {
@@ -694,7 +730,7 @@ fn run_loopback() {
     });
 
     let t = TcpTransport::connect(addr).expect("connect falhou");
-    run_viewer(t);
+    run_viewer(t, "PCShare — loopback");
 }
 
 // ---------------------------------------------------------------- host
@@ -825,10 +861,16 @@ fn servir<T: Transport>(
 }
 
 /// Handshake do lado do viewer e entrada no laço de exibição.
-fn assistir<T: Transport>(t: T, identity: &Identity, password: &str, plaintext: bool) {
+fn assistir<T: Transport>(
+    t: T,
+    identity: &Identity,
+    password: &str,
+    plaintext: bool,
+    titulo: &str,
+) {
     if plaintext {
         eprintln!("AVISO: sessão SEM criptografia");
-        run_viewer(t);
+        run_viewer(t, titulo);
         return;
     }
     match secure::connect(t, identity, password) {
@@ -840,7 +882,7 @@ fn assistir<T: Transport>(t: T, identity: &Identity, password: &str, plaintext: 
                 "viewer: host autenticado, impressão {}",
                 sec.remote_fingerprint()
             );
-            run_viewer(sec);
+            run_viewer(sec, titulo);
         }
         Err(e) => eprintln!("viewer: não foi possível autenticar ({e})"),
     }
@@ -1428,7 +1470,7 @@ impl HostStats {
 
 // -------------------------------------------------------------- viewer
 
-fn run_viewer<T: Transport>(mut t: T) {
+fn run_viewer<T: Transport>(mut t: T, titulo: &str) {
     // Nada pode ser desenhado antes de saber as dimensões do host.
     let Some((w, h)) = wait_hello(&mut t) else {
         eprintln!("viewer: conexão encerrada antes do Hello");
@@ -1468,7 +1510,7 @@ fn run_viewer<T: Transport>(mut t: T) {
 
     let mut win = match headless {
         Some(_) => None,
-        None => match window::Window::new(w!("PCShare — viewer (Sprint 0)"), 960, 540) {
+        None => match window::Window::new(titulo, 960, 540) {
             Ok(v) => Some(v),
             Err(e) => {
                 eprintln!("viewer: não foi possível criar a janela: {e}");

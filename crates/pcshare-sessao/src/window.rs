@@ -94,10 +94,13 @@ pub struct Window {
 }
 
 impl Window {
-    pub fn new(title: PCWSTR, width: i32, height: i32) -> Result<Self> {
+    pub fn new(title: &str, width: i32, height: i32) -> Result<Self> {
         unsafe {
             let instance = GetModuleHandleW(None)?;
             let class = w!("PcshareViewerWindow");
+            // O título vem de fora (ex.: o apelido da máquina); converte para
+            // UTF-16 terminado em nulo e mantém vivo até o CreateWindowExW.
+            let titulo: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
 
             let wc = WNDCLASSW {
                 lpfnWndProc: Some(wndproc),
@@ -123,7 +126,7 @@ impl Window {
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 class,
-                title,
+                PCWSTR(titulo.as_ptr()),
                 // WS_CLIPCHILDREN: ao repintar o vídeo/barra, não desenhar por
                 // cima dos botões filhos — senão eles piscariam a cada quadro.
                 WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN,

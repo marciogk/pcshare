@@ -13,6 +13,7 @@ use eframe::egui;
 use pcshare_core::secure;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 /// Servidor de encontro padrão (o VPS do usuário). Fica editável em
 /// Configurações e é gravado no primeiro uso.
@@ -21,12 +22,27 @@ const ENCONTRO_PADRAO: &str = "198.50.117.107:7100";
 /// Quantas máquinas recentes lembrar.
 const MAX_RECENTES: usize = 8;
 
+/// Uma máquina no catálogo de recentes: o ID e um apelido opcional.
+#[derive(Clone)]
+struct Maquina {
+    id: String,
+    alias: String,
+}
+
+/// Status de sessão compartilhado entre a thread do motor e a interface.
+#[derive(Default)]
+struct EstadoSessao {
+    mensagem: String,
+    ativa: bool,
+}
+
 fn pasta_pcshare() -> PathBuf {
     PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into())).join("PCShare")
 }
 
-/// Lê `ui.txt`: o endereço do encontro e a lista de IDs recentes.
-fn carregar_config() -> (String, Vec<String>) {
+/// Lê `ui.txt`: o endereço do encontro e o catálogo de máquinas recentes.
+/// Cada máquina é uma linha `maquina=<id>|<apelido>` (apelido opcional).
+fn carregar_config() -> (String, Vec<Maquina>) {
     let mut encontro = ENCONTRO_PADRAO.to_string();
     let mut recentes = Vec::new();
     if let Ok(txt) = std::fs::read_to_string(pasta_pcshare().join("ui.txt")) {
@@ -36,23 +52,30 @@ fn carregar_config() -> (String, Vec<String>) {
                 if !v.is_empty() {
                     encontro = v.to_string();
                 }
-            } else if let Some(v) = linha.strip_prefix("recentes=") {
-                recentes = v
-                    .split(',')
-                    .map(so_digitos)
-                    .filter(|s| s.len() == 9)
-                    .collect();
+            } else if let Some(v) = linha.strip_prefix("maquina=") {
+                let (id, alias) = match v.split_once('|') {
+                    Some((i, a)) => (so_digitos(i), a.to_string()),
+                    None => (so_digitos(v), String::new()),
+                };
+                if id.len() == 9 {
+                    recentes.push(Maquina { id, alias });
+                }
             }
         }
     }
     (encontro, recentes)
 }
 
-fn salvar_config(encontro: &str, recentes: &[String]) {
+fn salvar_config(encontro: &str, recentes: &[Maquina]) {
     let dir = pasta_pcshare();
     let _ = std::fs::create_dir_all(&dir);
-    let conteudo = format!("encontro={}\nrecentes={}\n", encontro.trim(), recentes.join(","));
-    let _ = std::fs::write(dir.join("ui.txt"), conteudo);
+    let mut s = format!("encontro={}\n", encontro.trim());
+    for m in recentes {
+        // `|` e quebras de linha separariam os campos: troca por espaço.
+        let alias = m.alias.replace(['|', '\n', '\r'], " ");
+        s.push_str(&format!("maquina={}|{}\n", m.id, alias.trim()));
+    }
+    let _ = std::fs::write(dir.join("ui.txt"), s);
 }
 
 /// Reduz o ID a nove dígitos, ignorando espaços e pontuação. O usuário
@@ -78,7 +101,12 @@ struct App {
     remoto_id: String,
     senha: String,
     senha_host: String,
-    recentes: Vec<String>,
+    recentes: Vec<Maquina>,
+    /// Índice do recente em edição de apelido, se houver.
+    editando: Option<usize>,
+    alias_buffer: String,
+    /// Status da sessão em curso, atualizado pela thread do motor.
+    estado: Arc<Mutex<EstadoSessao>>,
     status: String,
 }
 
@@ -98,19 +126,40 @@ impl App {
             // trocar. O host aceita `--password` explícito.
             senha_host: secure::random_password(),
             recentes,
+            editando: None,
+            alias_buffer: String::new(),
+            estado: Arc::new(Mutex::new(EstadoSessao::default())),
             status: String::new(),
         }
     }
 
-    /// Põe um ID no topo dos recentes (sem duplicar), limitando o tamanho.
+    /// Põe um ID no topo dos recentes (sem duplicar), preservando o apelido que
+    /// já houvesse, e limitando o tamanho da lista.
     fn registrar_recente(&mut self, id: &str) {
         let id = so_digitos(id);
         if id.len() != 9 {
             return;
         }
-        self.recentes.retain(|x| x != &id);
-        self.recentes.insert(0, id);
+        let alias = self
+            .recentes
+            .iter()
+            .find(|m| m.id == id)
+            .map(|m| m.alias.clone())
+            .unwrap_or_default();
+        self.recentes.retain(|m| m.id != id);
+        self.recentes.insert(0, Maquina { id, alias });
         self.recentes.truncate(MAX_RECENTES);
+    }
+
+    /// Nome de exibição de um ID: o apelido, se houver; senão o ID formatado.
+    fn nome_de(&self, id: &str) -> String {
+        let d = so_digitos(id);
+        self.recentes
+            .iter()
+            .find(|m| m.id == d)
+            .map(|m| m.alias.trim().to_string())
+            .filter(|a| !a.is_empty())
+            .unwrap_or_else(|| formatar_id(&d))
     }
 
     /// Interpreta o endereço do encontro, avisando na barra de status se estiver
@@ -127,8 +176,9 @@ impl App {
     }
 
     /// Abre a sessão de viewer contra o ID digitado, **no mesmo processo**: uma
-    /// thread roda o motor, que cria a própria janela e bloqueia até fechar.
-    fn conectar(&mut self) {
+    /// thread roda o motor, que cria a própria janela e bloqueia até fechar. O
+    /// motor relata o progresso, que a interface mostra ao vivo.
+    fn conectar(&mut self, ctx: &egui::Context) {
         let id = so_digitos(&self.remoto_id);
         if id.len() != 9 {
             self.status = "Informe um ID de 9 dígitos.".into();
@@ -143,18 +193,34 @@ impl App {
         };
         self.registrar_recente(&id);
         salvar_config(&self.encontro, &self.recentes);
+        self.status.clear();
         let senha = self.senha.trim().to_string();
+        let nome = self.nome_de(&id);
+        let titulo = format!("PCShare — {nome}");
+        let estado = self.estado.clone();
+        let ctx = ctx.clone();
         std::thread::spawn(move || {
-            if let Err(e) = pcshare_sessao::assistir_por_id(enc, &id, &senha) {
-                eprintln!("sessão de viewer encerrada: {e}");
-            }
+            let relatar = |p: pcshare_sessao::Progresso| {
+                let (mensagem, ativa) = match p {
+                    pcshare_sessao::Progresso::Procurando => (format!("Procurando {nome}…"), true),
+                    pcshare_sessao::Progresso::EmSessao => (format!("Em sessão com {nome}"), true),
+                    pcshare_sessao::Progresso::Encerrou => {
+                        (format!("Sessão com {nome} encerrada"), false)
+                    }
+                    pcshare_sessao::Progresso::Falhou(e) => (format!("Falha: {e}"), false),
+                };
+                if let Ok(mut g) = estado.lock() {
+                    *g = EstadoSessao { mensagem, ativa };
+                }
+                ctx.request_repaint();
+            };
+            let _ = pcshare_sessao::assistir_por_id(enc, &id, &senha, &titulo, relatar);
         });
-        self.status = format!("Abrindo a sessão com {}...", formatar_id(&self.remoto_id));
     }
 
     /// Compartilha a tela desta máquina, **no mesmo processo**: uma thread
     /// registra no encontro e atende sessões até o programa fechar.
-    fn compartilhar(&mut self) {
+    fn compartilhar(&mut self, ctx: &egui::Context) {
         if self.senha_host.trim().is_empty() {
             self.status = "Defina uma senha para compartilhar.".into();
             return;
@@ -163,17 +229,27 @@ impl App {
             return;
         };
         salvar_config(&self.encontro, &self.recentes);
-        let senha = self.senha_host.trim().to_string();
-        std::thread::spawn(move || {
-            if let Err(e) = pcshare_sessao::hospedar_por_id(enc, &senha) {
-                eprintln!("sessão de host encerrada: {e}");
-            }
-        });
         self.status = format!(
-            "Compartilhando esta tela. Passe ao outro lado — ID {} · senha {}",
+            "Passe ao outro lado — ID {} · senha {}",
             self.id_local,
             self.senha_host.trim()
         );
+        let senha = self.senha_host.trim().to_string();
+        let estado = self.estado.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let relatar = |p: pcshare_sessao::Progresso| {
+                let (mensagem, ativa) = match p {
+                    pcshare_sessao::Progresso::Falhou(e) => (format!("Falha: {e}"), false),
+                    _ => ("Compartilhando esta tela (aguardando conexões)".into(), true),
+                };
+                if let Ok(mut g) = estado.lock() {
+                    *g = EstadoSessao { mensagem, ativa };
+                }
+                ctx.request_repaint();
+            };
+            let _ = pcshare_sessao::hospedar_por_id(enc, &senha, relatar);
+        });
     }
 }
 
@@ -212,7 +288,7 @@ impl eframe::App for App {
                             .desired_width(96.0),
                     );
                     if ui.button("Compartilhar minha tela").clicked() {
-                        self.compartilhar();
+                        self.compartilhar(ctx);
                     }
                 });
             });
@@ -245,7 +321,7 @@ impl eframe::App for App {
                 let conectar = egui::Button::new(egui::RichText::new("Conectar").color(egui::Color32::WHITE))
                     .fill(ACCENT);
                 if ui.add_sized([ui.available_width(), 30.0], conectar).clicked() {
-                    self.conectar();
+                    self.conectar(ctx);
                 }
 
                 // ---- máquinas recentes ----
@@ -253,15 +329,52 @@ impl eframe::App for App {
                     ui.add_space(8.0);
                     ui.label(egui::RichText::new("RECENTES").small().weak());
                     ui.add_space(2.0);
-                    let mut escolhido = None;
-                    ui.horizontal_wrapped(|ui| {
-                        for id in &self.recentes {
-                            if ui.button(formatar_id(id)).clicked() {
-                                escolhido = Some(id.clone());
+                    // Itera sobre uma cópia para poder mutar self.* dentro do laço
+                    // (preencher o ID, abrir/fechar a edição de apelido).
+                    let recentes = self.recentes.clone();
+                    let mut preencher: Option<String> = None;
+                    for (i, m) in recentes.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            let rotulo = if m.alias.trim().is_empty() {
+                                formatar_id(&m.id)
+                            } else {
+                                m.alias.clone()
+                            };
+                            if ui.button(rotulo).clicked() {
+                                preencher = Some(m.id.clone());
                             }
+                            if !m.alias.trim().is_empty() {
+                                ui.label(egui::RichText::new(formatar_id(&m.id)).small().weak());
+                            }
+                            let editando = self.editando == Some(i);
+                            if ui.selectable_label(editando, "renomear").clicked() {
+                                if editando {
+                                    self.editando = None;
+                                } else {
+                                    self.editando = Some(i);
+                                    self.alias_buffer = m.alias.clone();
+                                }
+                            }
+                        });
+                        if self.editando == Some(i) {
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.alias_buffer)
+                                        .hint_text("apelido")
+                                        .desired_width(150.0),
+                                );
+                                if ui.button("Salvar").clicked() {
+                                    let alias = self.alias_buffer.trim().to_string();
+                                    if let Some(r) = self.recentes.iter_mut().find(|r| r.id == m.id) {
+                                        r.alias = alias;
+                                    }
+                                    self.editando = None;
+                                    salvar_config(&self.encontro, &self.recentes);
+                                }
+                            });
                         }
-                    });
-                    if let Some(id) = escolhido {
+                    }
+                    if let Some(id) = preencher {
                         self.remoto_id = formatar_id(&id);
                         self.status = "ID preenchido — informe a senha e conecte.".into();
                     }
@@ -283,10 +396,31 @@ impl eframe::App for App {
                 );
             });
 
-            if !self.status.is_empty() {
+            // ---- status da sessão (ao vivo) e mensagens do formulário ----
+            let (sess_msg, sess_ativa) = match self.estado.lock() {
+                Ok(g) => (g.mensagem.clone(), g.ativa),
+                Err(_) => (String::new(), false),
+            };
+            if !sess_msg.is_empty() || !self.status.is_empty() {
                 ui.add_space(10.0);
                 ui.separator();
-                ui.label(&self.status);
+                ui.add_space(6.0);
+                if !sess_msg.is_empty() {
+                    ui.horizontal(|ui| {
+                        let cor = if sess_ativa {
+                            egui::Color32::from_rgb(0x3F, 0xB9, 0x50) // verde: em sessão
+                        } else {
+                            egui::Color32::GRAY // encerrada/falhou
+                        };
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                        ui.painter().circle_filled(rect.center(), 5.0, cor);
+                        ui.label(&sess_msg);
+                    });
+                }
+                if !self.status.is_empty() {
+                    ui.label(egui::RichText::new(&self.status).small().weak());
+                }
             }
         });
     }
