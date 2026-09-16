@@ -203,11 +203,22 @@ impl App {
             let relatar = |p: pcshare_sessao::Progresso| {
                 let (mensagem, ativa) = match p {
                     pcshare_sessao::Progresso::Procurando => (format!("Procurando {nome}…"), true),
-                    pcshare_sessao::Progresso::EmSessao => (format!("Em sessão com {nome}"), true),
+                    pcshare_sessao::Progresso::EmSessao => {
+                        // A janela de vídeo vai abrir e ficar na frente; some com
+                        // a janela de conexão para não competir por espaço/foco.
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                        (format!("Em sessão com {nome}"), true)
+                    }
                     pcshare_sessao::Progresso::Encerrou => {
+                        // Sessão fechou: traz a janela de conexão de volta.
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                         (format!("Sessão com {nome} encerrada"), false)
                     }
-                    pcshare_sessao::Progresso::Falhou(e) => (format!("Falha: {e}"), false),
+                    pcshare_sessao::Progresso::Falhou(e) => {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                        (format!("Falha: {e}"), false)
+                    }
                 };
                 if let Ok(mut g) = estado.lock() {
                     *g = EstadoSessao { mensagem, ativa };
