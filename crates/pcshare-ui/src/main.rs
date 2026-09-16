@@ -14,7 +14,8 @@
 //! invoca.
 
 use eframe::egui;
-use pcshare_core::secure::{self, Identity};
+use pcshare_core::secure;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 /// Servidor de encontro padrão (o VPS do usuário). Fica editável em
@@ -23,29 +24,6 @@ const ENCONTRO_PADRAO: &str = "198.50.117.107:7100";
 
 fn pasta_pcshare() -> PathBuf {
     PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into())).join("PCShare")
-}
-
-/// Carrega a identidade desta máquina, criando-a no primeiro uso. **Mesmo
-/// caminho do `pcshare-spike`** (`%LOCALAPPDATA%\PCShare\identity.key`), para o
-/// ID exibido aqui ser o mesmo que o host anuncia.
-fn carregar_identidade() -> Option<Identity> {
-    let dir = pasta_pcshare();
-    let path = dir.join("identity.key");
-    if let Ok(bytes) = std::fs::read(&path)
-        && let Ok(id) = Identity::from_private(bytes)
-    {
-        return Some(id);
-    }
-    let id = Identity::generate().ok()?;
-    let _ = std::fs::create_dir_all(&dir);
-    let _ = std::fs::write(&path, id.private_key());
-    Some(id)
-}
-
-/// O `pcshare-spike.exe` ao lado deste executável.
-fn caminho_spike() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    Some(exe.parent()?.join("pcshare-spike.exe"))
 }
 
 fn carregar_encontro() -> String {
@@ -87,10 +65,8 @@ struct App {
 
 impl App {
     fn new() -> Self {
-        let (id_local, fingerprint) = match carregar_identidade() {
-            Some(id) => (id.display_id(), id.fingerprint()),
-            None => ("— erro ao carregar a identidade —".into(), String::new()),
-        };
+        let (id_local, fingerprint) = pcshare_sessao::identidade_local()
+            .unwrap_or_else(|| ("— erro ao carregar a identidade —".into(), String::new()));
         Self {
             id_local,
             fingerprint,
@@ -104,7 +80,21 @@ impl App {
         }
     }
 
-    /// Lança o viewer contra o ID digitado.
+    /// Interpreta o endereço do encontro, avisando na barra de status se estiver
+    /// malformado.
+    fn encontro_addr(&mut self) -> Option<SocketAddr> {
+        match self.encontro.trim().parse::<SocketAddr>() {
+            Ok(a) => Some(a),
+            Err(_) => {
+                self.status =
+                    "Endereço de encontro inválido (use ip:porta, ex. 198.50.117.107:7100).".into();
+                None
+            }
+        }
+    }
+
+    /// Abre a sessão de viewer contra o ID digitado, **no mesmo processo**: uma
+    /// thread roda o motor, que cria a própria janela e bloqueia até fechar.
     fn conectar(&mut self) {
         let id = so_digitos(&self.remoto_id);
         if id.len() != 9 {
@@ -115,58 +105,41 @@ impl App {
             self.status = "Informe a senha da máquina remota.".into();
             return;
         }
-        let Some(spike) = caminho_spike() else {
-            self.status = "Não encontrei o pcshare-spike.exe ao lado deste programa.".into();
+        let Some(enc) = self.encontro_addr() else {
             return;
         };
         salvar_encontro(&self.encontro);
-        match std::process::Command::new(&spike)
-            .args([
-                "viewer",
-                "--encontro",
-                self.encontro.trim(),
-                "--id",
-                &id,
-                "--password",
-                self.senha.trim(),
-            ])
-            .spawn()
-        {
-            Ok(_) => self.status = format!("Abrindo a sessão com {}...", self.remoto_id.trim()),
-            Err(e) => self.status = format!("Falha ao iniciar a sessão: {e}"),
-        }
+        let senha = self.senha.trim().to_string();
+        std::thread::spawn(move || {
+            if let Err(e) = pcshare_sessao::assistir_por_id(enc, &id, &senha) {
+                eprintln!("sessão de viewer encerrada: {e}");
+            }
+        });
+        self.status = format!("Abrindo a sessão com {}...", self.remoto_id.trim());
     }
 
-    /// Lança o host, compartilhando a tela desta máquina.
+    /// Compartilha a tela desta máquina, **no mesmo processo**: uma thread
+    /// registra no encontro e atende sessões até o programa fechar.
     fn compartilhar(&mut self) {
         if self.senha_host.trim().is_empty() {
             self.status = "Defina uma senha para compartilhar.".into();
             return;
         }
-        let Some(spike) = caminho_spike() else {
-            self.status = "Não encontrei o pcshare-spike.exe ao lado deste programa.".into();
+        let Some(enc) = self.encontro_addr() else {
             return;
         };
         salvar_encontro(&self.encontro);
-        match std::process::Command::new(&spike)
-            .args([
-                "host",
-                "--encontro",
-                self.encontro.trim(),
-                "--password",
-                self.senha_host.trim(),
-            ])
-            .spawn()
-        {
-            Ok(_) => {
-                self.status = format!(
-                    "Compartilhando esta tela. Passe ao outro lado — ID {} · senha {}",
-                    self.id_local,
-                    self.senha_host.trim()
-                );
+        let senha = self.senha_host.trim().to_string();
+        std::thread::spawn(move || {
+            if let Err(e) = pcshare_sessao::hospedar_por_id(enc, &senha) {
+                eprintln!("sessão de host encerrada: {e}");
             }
-            Err(e) => self.status = format!("Falha ao compartilhar: {e}"),
-        }
+        });
+        self.status = format!(
+            "Compartilhando esta tela. Passe ao outro lado — ID {} · senha {}",
+            self.id_local,
+            self.senha_host.trim()
+        );
     }
 }
 

@@ -2040,7 +2040,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pcshare-spike"
+name = "pcshare-sessao"
 version = "0.0.1"
 dependencies = [
  "pcshare-capture",
@@ -2053,11 +2053,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pcshare-spike"
+version = "0.0.1"
+dependencies = [
+ "pcshare-sessao",
+]
+
+[[package]]
 name = "pcshare-ui"
 version = "0.0.1"
 dependencies = [
  "eframe",
  "pcshare-core",
+ "pcshare-sessao",
 ]
 
 [[package]]

@@ -1,0 +1,15 @@
+[package]
+name = "pcshare-sessao"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+pcshare-capture = { version = "0.0.1", path = "../pcshare-capture" }
+pcshare-codec = { version = "0.0.1", path = "../pcshare-codec" }
+pcshare-core = { version = "0.0.1", path = "../pcshare-core" }
+pcshare-encontro = { version = "0.0.1", path = "../pcshare-encontro" }
+pcshare-gpu = { version = "0.0.1", path = "../pcshare-gpu" }
+pcshare-input = { version = "0.0.1", path = "../pcshare-input" }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Controls_Dialogs"] }

@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 pcshare-core = { version = "0.0.1", path = "../pcshare-core" }
+pcshare-sessao = { version = "0.0.1", path = "../pcshare-sessao" }
 # glow (OpenGL), não wgpu: a máquina de dev tem Intel HD 4600, GPU antiga em
 # que o caminho OpenGL é o mais compatível. Ver [[pcshare-restricoes-maquina-dev]].
 eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts"] }
