@@ -1,17 +1,13 @@
+// No modo release, sem console: uma janela preta atrás da interface seria feia
+// num produto. Em debug o console fica, para ver os prints do motor.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 //! Interface do PCShare — a janela de conexão.
 //!
-//! Primeira fatia do frontend: mostra o ID desta máquina, deixa conectar a
-//! outra por ID+senha, e compartilhar a própria tela. Não substitui ainda a
-//! janela de sessão (o vídeo continua na janela Win32 do `pcshare-spike`).
-//!
-//! # Ponte, por ora
-//!
-//! Conectar e compartilhar **lançam o `pcshare-spike.exe`** ao lado, que é o
-//! motor de sessão já provado ponta a ponta. É uma ponte deliberada: troca a
-//! linha de comando por uma tela sem reescrever o que funciona. O passo
-//! seguinte é extrair a sessão para uma biblioteca e chamá-la no mesmo
-//! processo — a lógica de cada botão fica no mesmo lugar, só muda o que ela
-//! invoca.
+//! Mostra o ID desta máquina, conecta a outra por ID+senha, e compartilha a
+//! própria tela. Conectar/Compartilhar rodam o motor (`pcshare-sessao`) **numa
+//! thread do mesmo processo**, que abre a janela de sessão. O vídeo continua na
+//! janela Win32 do motor; esta é a janela de controle.
 
 use eframe::egui;
 use pcshare_core::secure;
@@ -22,35 +18,57 @@ use std::path::PathBuf;
 /// Configurações e é gravado no primeiro uso.
 const ENCONTRO_PADRAO: &str = "198.50.117.107:7100";
 
+/// Quantas máquinas recentes lembrar.
+const MAX_RECENTES: usize = 8;
+
 fn pasta_pcshare() -> PathBuf {
     PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into())).join("PCShare")
 }
 
-fn carregar_encontro() -> String {
-    let path = pasta_pcshare().join("ui.txt");
-    if let Ok(txt) = std::fs::read_to_string(&path) {
+/// Lê `ui.txt`: o endereço do encontro e a lista de IDs recentes.
+fn carregar_config() -> (String, Vec<String>) {
+    let mut encontro = ENCONTRO_PADRAO.to_string();
+    let mut recentes = Vec::new();
+    if let Ok(txt) = std::fs::read_to_string(pasta_pcshare().join("ui.txt")) {
         for linha in txt.lines() {
             if let Some(v) = linha.strip_prefix("encontro=") {
                 let v = v.trim();
                 if !v.is_empty() {
-                    return v.to_string();
+                    encontro = v.to_string();
                 }
+            } else if let Some(v) = linha.strip_prefix("recentes=") {
+                recentes = v
+                    .split(',')
+                    .map(so_digitos)
+                    .filter(|s| s.len() == 9)
+                    .collect();
             }
         }
     }
-    ENCONTRO_PADRAO.to_string()
+    (encontro, recentes)
 }
 
-fn salvar_encontro(s: &str) {
+fn salvar_config(encontro: &str, recentes: &[String]) {
     let dir = pasta_pcshare();
     let _ = std::fs::create_dir_all(&dir);
-    let _ = std::fs::write(dir.join("ui.txt"), format!("encontro={}\n", s.trim()));
+    let conteudo = format!("encontro={}\nrecentes={}\n", encontro.trim(), recentes.join(","));
+    let _ = std::fs::write(dir.join("ui.txt"), conteudo);
 }
 
-/// Reduz o ID digitado a nove dígitos, ignorando espaços e pontuação. O usuário
+/// Reduz o ID a nove dígitos, ignorando espaços e pontuação. O usuário
 /// pode colar "737 071 101" ou "737071101" — os dois viram o mesmo.
 fn so_digitos(s: &str) -> String {
     s.chars().filter(char::is_ascii_digit).collect()
+}
+
+/// Formata nove dígitos como "XXX XXX XXX"; deixa como está se não forem nove.
+fn formatar_id(id: &str) -> String {
+    let d = so_digitos(id);
+    if d.len() == 9 {
+        format!("{} {} {}", &d[0..3], &d[3..6], &d[6..9])
+    } else {
+        d
+    }
 }
 
 struct App {
@@ -60,24 +78,39 @@ struct App {
     remoto_id: String,
     senha: String,
     senha_host: String,
+    recentes: Vec<String>,
     status: String,
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        aplicar_tema(&cc.egui_ctx);
         let (id_local, fingerprint) = pcshare_sessao::identidade_local()
             .unwrap_or_else(|| ("— erro ao carregar a identidade —".into(), String::new()));
+        let (encontro, recentes) = carregar_config();
         Self {
             id_local,
             fingerprint,
-            encontro: carregar_encontro(),
+            encontro,
             remoto_id: String::new(),
             senha: String::new(),
             // Sugere uma senha forte para o modo de compartilhar; o usuário pode
             // trocar. O host aceita `--password` explícito.
             senha_host: secure::random_password(),
+            recentes,
             status: String::new(),
         }
+    }
+
+    /// Põe um ID no topo dos recentes (sem duplicar), limitando o tamanho.
+    fn registrar_recente(&mut self, id: &str) {
+        let id = so_digitos(id);
+        if id.len() != 9 {
+            return;
+        }
+        self.recentes.retain(|x| x != &id);
+        self.recentes.insert(0, id);
+        self.recentes.truncate(MAX_RECENTES);
     }
 
     /// Interpreta o endereço do encontro, avisando na barra de status se estiver
@@ -108,14 +141,15 @@ impl App {
         let Some(enc) = self.encontro_addr() else {
             return;
         };
-        salvar_encontro(&self.encontro);
+        self.registrar_recente(&id);
+        salvar_config(&self.encontro, &self.recentes);
         let senha = self.senha.trim().to_string();
         std::thread::spawn(move || {
             if let Err(e) = pcshare_sessao::assistir_por_id(enc, &id, &senha) {
                 eprintln!("sessão de viewer encerrada: {e}");
             }
         });
-        self.status = format!("Abrindo a sessão com {}...", self.remoto_id.trim());
+        self.status = format!("Abrindo a sessão com {}...", formatar_id(&self.remoto_id));
     }
 
     /// Compartilha a tela desta máquina, **no mesmo processo**: uma thread
@@ -128,7 +162,7 @@ impl App {
         let Some(enc) = self.encontro_addr() else {
             return;
         };
-        salvar_encontro(&self.encontro);
+        salvar_config(&self.encontro, &self.recentes);
         let senha = self.senha_host.trim().to_string();
         std::thread::spawn(move || {
             if let Err(e) = pcshare_sessao::hospedar_por_id(enc, &senha) {
@@ -208,11 +242,29 @@ impl eframe::App for App {
                     );
                 });
                 ui.add_space(8.0);
-                if ui
-                    .add_sized([ui.available_width(), 28.0], egui::Button::new("Conectar"))
-                    .clicked()
-                {
+                let conectar = egui::Button::new(egui::RichText::new("Conectar").color(egui::Color32::WHITE))
+                    .fill(ACCENT);
+                if ui.add_sized([ui.available_width(), 30.0], conectar).clicked() {
                     self.conectar();
+                }
+
+                // ---- máquinas recentes ----
+                if !self.recentes.is_empty() {
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new("RECENTES").small().weak());
+                    ui.add_space(2.0);
+                    let mut escolhido = None;
+                    ui.horizontal_wrapped(|ui| {
+                        for id in &self.recentes {
+                            if ui.button(formatar_id(id)).clicked() {
+                                escolhido = Some(id.clone());
+                            }
+                        }
+                    });
+                    if let Some(id) = escolhido {
+                        self.remoto_id = formatar_id(&id);
+                        self.status = "ID preenchido — informe a senha e conecte.".into();
+                    }
                 }
             });
 
@@ -240,6 +292,27 @@ impl eframe::App for App {
     }
 }
 
+/// Azul de destaque, usado no botão principal e na seleção.
+const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x3B, 0x82, 0xF6);
+
+/// Aplica um tema escuro consistente, independente do tema do sistema, com um
+/// leve toque de destaque e um espaçamento mais folgado que o padrão.
+fn aplicar_tema(ctx: &egui::Context) {
+    // Fixa o tema escuro. Sem isto, o eframe segue o tema do sistema e
+    // re-deriva as cores a cada quadro, desfazendo o `set_visuals` abaixo.
+    ctx.set_theme(egui::ThemePreference::Dark);
+    let mut v = egui::Visuals::dark();
+    v.hyperlink_color = ACCENT;
+    v.selection.bg_fill = ACCENT.gamma_multiply(0.35);
+    v.selection.stroke = egui::Stroke::new(1.0, ACCENT);
+    ctx.set_visuals(v);
+
+    let mut style = (*ctx.style()).clone();
+    style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+    style.spacing.button_padding = egui::vec2(12.0, 7.0);
+    ctx.set_style(style);
+}
+
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -251,6 +324,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "PCShare",
         options,
-        Box::new(|_cc| Ok(Box::new(App::new()))),
+        Box::new(|cc| Ok(Box::new(App::new(cc)))),
     )
 }
