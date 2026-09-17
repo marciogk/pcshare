@@ -104,7 +104,17 @@ const YCBCR_601_LIMITED: u32 = 1 << 4;
 const RGB_FULL: u32 = 0;
 
 impl Nv12Converter {
-    pub fn new(gpu: Arc<GpuContext>, width: u32, height: u32) -> Result<Self> {
+    /// Converte BGRA para NV12. Quando `out_*` é menor que `in_*`, o processador
+    /// de vídeo **reduz** a imagem no mesmo passo — redimensionamento por
+    /// hardware, melhor que encolher só na exibição por GDI. Passe os mesmos
+    /// valores nos dois pares quando não quiser redução.
+    pub fn new(
+        gpu: Arc<GpuContext>,
+        in_width: u32,
+        in_height: u32,
+        out_width: u32,
+        out_height: u32,
+    ) -> Result<Self> {
         unsafe {
             let video_device: ID3D11VideoDevice = gpu.device().cast()?;
             let video_context: ID3D11VideoContext = gpu.context().cast()?;
@@ -115,17 +125,18 @@ impl Nv12Converter {
                     Numerator: 60,
                     Denominator: 1,
                 },
-                InputWidth: width,
-                InputHeight: height,
+                InputWidth: in_width,
+                InputHeight: in_height,
                 OutputFrameRate: DXGI_RATIONAL {
                     Numerator: 60,
                     Denominator: 1,
                 },
-                OutputWidth: width,
-                OutputHeight: height,
+                OutputWidth: out_width,
+                OutputHeight: out_height,
                 // Conteúdo de tela: prioriza velocidade sobre filtragem
-                // elaborada, que aqui não tem o que melhorar (sem
-                // redimensionamento, sem desentrelaçamento).
+                // elaborada. O redimensionamento (quando há) usa o filtro
+                // padrão do processador, que já é bem melhor que o encolhimento
+                // grosseiro do GDI no viewer.
                 Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
             };
 
@@ -133,7 +144,7 @@ impl Nv12Converter {
             let processor = video_device.CreateVideoProcessor(&enumerator, 0)?;
 
             let (output, output_view) =
-                Self::make_output(&gpu, &video_device, &enumerator, width, height)?;
+                Self::make_output(&gpu, &video_device, &enumerator, out_width, out_height)?;
 
             let me = Self {
                 gpu,
@@ -143,8 +154,8 @@ impl Nv12Converter {
                 processor,
                 output,
                 output_view,
-                width,
-                height,
+                width: out_width,
+                height: out_height,
             };
 
             me.video_context.VideoProcessorSetStreamColorSpace(

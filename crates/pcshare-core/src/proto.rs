@@ -102,6 +102,12 @@ pub enum Message {
     /// pelas mesmas mensagens `FileOffer`/`FileChunk`/`FileEnd`, agora no
     /// sentido host → viewer.
     RequestFile,
+    /// Viewer → host: capture/codifique **nesta resolução** (a do monitor do
+    /// viewer). O host reduz a captura para caber aqui antes de codificar, para
+    /// não mandar mais pixels do que o viewer vai exibir — o que evita o
+    /// borrão de encolher a imagem só na exibição. O host nunca amplia: se a
+    /// tela dele já é menor, ignora.
+    SetResolution { width: u32, height: u32 },
 }
 
 const TAG_HELLO: u8 = 0x01;
@@ -115,6 +121,7 @@ const TAG_FILE_OFFER: u8 = 0x08;
 const TAG_FILE_CHUNK: u8 = 0x09;
 const TAG_FILE_END: u8 = 0x0A;
 const TAG_REQUEST_FILE: u8 = 0x0B;
+const TAG_SET_RESOLUTION: u8 = 0x0C;
 
 const IN_MOUSE_MOVE: u8 = 0x01;
 const IN_MOUSE_BUTTON: u8 = 0x02;
@@ -172,6 +179,11 @@ impl Message {
             }
             Message::FileEnd => b.push(TAG_FILE_END),
             Message::RequestFile => b.push(TAG_REQUEST_FILE),
+            Message::SetResolution { width, height } => {
+                b.push(TAG_SET_RESOLUTION);
+                put_u32(&mut b, *width);
+                put_u32(&mut b, *height);
+            }
             Message::Input(ev) => {
                 b.push(TAG_INPUT);
                 encode_input(&mut b, ev);
@@ -228,6 +240,10 @@ impl Message {
             }
             TAG_FILE_END => Message::FileEnd,
             TAG_REQUEST_FILE => Message::RequestFile,
+            TAG_SET_RESOLUTION => Message::SetResolution {
+                width: r.u32()?,
+                height: r.u32()?,
+            },
             TAG_INPUT => Message::Input(decode_input(&mut r)?),
             TAG_PING => Message::Ping {
                 nonce: r.u64()?,
@@ -395,6 +411,10 @@ mod tests {
         });
         roundtrip(Message::FileEnd);
         roundtrip(Message::RequestFile);
+        roundtrip(Message::SetResolution {
+            width: 1360,
+            height: 768,
+        });
         roundtrip(Message::Ping {
             nonce: 7,
             sent_us: 123456789,

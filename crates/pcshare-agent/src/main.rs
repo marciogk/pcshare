@@ -286,7 +286,7 @@ fn rodar(
     // software e driver antigo caem no caminho por memória de sistema, e é
     // melhor perder desempenho do que não funcionar.
     let mut conv = match enc.is_gpu_direct() {
-        true => Some(pcshare_gpu::Nv12Converter::new(gpu.clone(), w, h)?),
+        true => Some(pcshare_gpu::Nv12Converter::new(gpu.clone(), w, h, w, h)?),
         false => None,
     };
     log(

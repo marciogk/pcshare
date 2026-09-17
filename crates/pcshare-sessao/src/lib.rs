@@ -893,6 +893,70 @@ fn arg_value(nome: &str) -> Option<String> {
     a.iter().position(|x| x == nome).and_then(|i| a.get(i + 1).cloned())
 }
 
+/// Espera o viewer anunciar a resolução do monitor dele, até `prazo`. Ignora
+/// outras mensagens iniciais (um ping adiantado, por exemplo). Devolve `None`
+/// se nada chegar a tempo — aí o host mantém a resolução nativa.
+fn esperar_resolucao<T: Transport>(t: &mut T, prazo: Duration) -> Option<(u32, u32)> {
+    let limite = Instant::now() + prazo;
+    loop {
+        match t.poll() {
+            Ok(Some((Channel::Control, payload))) => {
+                if let Ok(Message::SetResolution { width, height }) = Message::decode(&payload) {
+                    return Some((width, height));
+                }
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                if Instant::now() >= limite {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Reduz (nunca amplia) `n` para caber em `r`, preservando a proporção. As
+/// dimensões saem **pares**, que o NV12 exige.
+fn resolucao_alvo(nw: u32, nh: u32, rw: u32, rh: u32) -> (u32, u32) {
+    if rw == 0 || rh == 0 {
+        return (nw, nh);
+    }
+    let fator = (rw as f64 / nw as f64)
+        .min(rh as f64 / nh as f64)
+        .min(1.0);
+    let ow = ((nw as f64 * fator).round() as u32) & !1;
+    let oh = ((nh as f64 * fator).round() as u32) & !1;
+    (ow.max(2), oh.max(2))
+}
+
+/// Tamanho do monitor principal, em pixels. É o que o viewer pede ao host, para
+/// não receber mais pixels do que a tela dele mostra.
+fn tamanho_monitor() -> (u32, u32) {
+    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+    unsafe {
+        let w = GetSystemMetrics(SM_CXSCREEN).max(1) as u32;
+        let h = GetSystemMetrics(SM_CYSCREEN).max(1) as u32;
+        (w, h)
+    }
+}
+
+/// Resolução que o viewer pede ao host: o monitor, ou o que `PCSHARE_VIEWER_RES`
+/// (formato `LARGURAxALTURA`) forçar — útil para limitar a banda num link lento
+/// e para testar a redução sem depender do tamanho da tela.
+fn resolucao_desejada() -> (u32, u32) {
+    if let Ok(s) = std::env::var("PCSHARE_VIEWER_RES")
+        && let Some((w, h)) = s.split_once(['x', 'X'])
+        && let (Ok(w), Ok(h)) = (w.trim().parse::<u32>(), h.trim().parse::<u32>())
+        && w > 0
+        && h > 0
+    {
+        return (w, h);
+    }
+    tamanho_monitor()
+}
+
 fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
     // `--cpu-path` força o caminho antigo (leitura da GPU + conversão na CPU),
     // para comparação A/B com o caminho sem cópia.
@@ -900,21 +964,40 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
 
     let gpu = GpuContext::new()?;
     let mut cap = DesktopCapture::with_gpu(gpu.clone(), 0)?;
-    let (w, h) = (cap.width(), cap.height());
-    println!("host: capturando {w}x{h}");
+    let (nw, nh) = (cap.width(), cap.height());
+    println!("host: capturando {nw}x{nh}");
 
+    // O viewer manda a resolução do monitor dele logo ao conectar. Esperamos
+    // um instante por ela antes de montar o encoder, para já codificar no
+    // tamanho que ele vai exibir — e não mandar pixels a mais, que só borrariam
+    // ao encolher na tela do viewer.
+    let pedido = esperar_resolucao(&mut t, Duration::from_millis(400));
+
+    // Encoder primeiro em tamanho nativo, só para saber se o caminho é GPU
+    // direto — é nele que o processador de vídeo reduz a imagem por hardware.
     let mut enc = if force_cpu {
-        H264Encoder::new(w, h, fps(), bitrate())?
+        H264Encoder::new(nw, nh, fps(), bitrate())?
     } else {
-        H264Encoder::with_gpu(&gpu, w, h, fps(), bitrate())?
+        H264Encoder::with_gpu(&gpu, nw, nh, fps(), bitrate())?
     };
+    let gpu_direct = enc.is_gpu_direct();
+
+    // Só reduz no caminho GPU. No caminho por CPU, mantém o nativo.
+    let (ow, oh) = match pedido {
+        Some((rw, rh)) if gpu_direct => resolucao_alvo(nw, nh, rw, rh),
+        _ => (nw, nh),
+    };
+    if (ow, oh) != (nw, nh) {
+        println!("host: reduzindo {nw}x{nh} -> {ow}x{oh} para o monitor do viewer");
+        enc = H264Encoder::with_gpu(&gpu, ow, oh, fps(), bitrate())?;
+    }
     println!("host: encoder [{}] ({})", enc.name(), enc.tuning().join(", "));
 
     // O conversor na GPU só entra se o encoder aceitar texturas. Encoder de
     // software e driver antigo caem no caminho por memória de sistema, e é
     // melhor perder desempenho do que não funcionar.
-    let mut conv = match enc.is_gpu_direct() {
-        true => Some(pcshare_gpu::Nv12Converter::new(gpu.clone(), w, h)?),
+    let mut conv = match gpu_direct {
+        true => Some(pcshare_gpu::Nv12Converter::new(gpu.clone(), nw, nh, ow, oh)?),
         false => None,
     };
     println!(
@@ -927,8 +1010,8 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let hello = Message::Hello {
-        width: w,
-        height: h,
+        width: ow,
+        height: oh,
         fps: fps(),
     };
     t.send(hello.channel(), &hello.encode())?;
@@ -965,7 +1048,9 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Ok(Message::Input(ev)) => {
                     if !VIEW_ONLY.load(Ordering::Relaxed) {
-                        input::inject(&ev, w, h);
+                        // Coordenadas do viewer vêm no espaço da resolução que
+                        // ele exibe (a do stream), não a nativa.
+                        input::inject(&ev, ow, oh);
                     }
                     stats.input_events += 1;
                 }
@@ -1105,7 +1190,7 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
             stats.readback_ms.push(ms(t0));
 
             let t1 = Instant::now();
-            bgra_to_nv12(&bgra, w as usize, h as usize, &mut nv12);
+            bgra_to_nv12(&bgra, nw as usize, nh as usize, &mut nv12);
             stats.convert_ms.push(ms(t1));
 
             let t2 = Instant::now();
@@ -1471,7 +1556,30 @@ impl HostStats {
 // -------------------------------------------------------------- viewer
 
 fn run_viewer<T: Transport>(mut t: T, titulo: &str) {
-    // Nada pode ser desenhado antes de saber as dimensões do host.
+    // `--headless <segundos>`: sem janela. Existe para medir a banda de uma
+    // tela realmente parada — com janela, ela exibe o que é capturado e cada
+    // quadro gera o próximo (realimentação). No headless não pedimos redução de
+    // resolução: a medição quer o tamanho nativo.
+    let headless: Option<u64> = {
+        let a: Vec<String> = std::env::args().collect();
+        a.iter()
+            .position(|x| x == "--headless")
+            .map(|i| a.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(20))
+    };
+
+    // Auto-resolução: pede ao host para já mandar no tamanho deste monitor. O
+    // host reduz a captura antes de codificar, então a imagem chega quase 1:1
+    // em vez de encolhida na exibição (o que borra). O host nunca amplia.
+    if headless.is_none() {
+        let (rw, rh) = resolucao_desejada();
+        let m = Message::SetResolution {
+            width: rw,
+            height: rh,
+        };
+        let _ = t.send(m.channel(), &m.encode());
+    }
+
+    // Nada pode ser desenhado antes de saber as dimensões (já reduzidas) do host.
     let Some((w, h)) = wait_hello(&mut t) else {
         eprintln!("viewer: conexão encerrada antes do Hello");
         return;
@@ -1495,28 +1603,22 @@ fn run_viewer<T: Transport>(mut t: T, titulo: &str) {
         return;
     }
 
-    // `--headless <segundos>`: sem janela.
-    //
-    // Existe para medir a banda de uma tela realmente parada. Com a janela
-    // aberta é impossível: ela exibe a tela que está sendo capturada, então
-    // cada quadro exibido altera a tela e gera o próximo. A medição mediria a
-    // própria realimentação.
-    let headless: Option<u64> = {
-        let a: Vec<String> = std::env::args().collect();
-        a.iter().position(|x| x == "--headless").map(|i| {
-            a.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(20)
-        })
-    };
-
     let mut win = match headless {
         Some(_) => None,
-        None => match window::Window::new(titulo, 960, 540) {
-            Ok(v) => Some(v),
-            Err(e) => {
-                eprintln!("viewer: não foi possível criar a janela: {e}");
-                return;
+        None => {
+            // Janela do tamanho do stream + a barra, sem passar do monitor —
+            // assim o vídeo aparece perto de 1:1.
+            let (mw, mh) = tamanho_monitor();
+            let cw = (w as i32).min(mw as i32 - 60).max(320);
+            let ch = (h as i32 + 40).min(mh as i32 - 120).max(240);
+            match window::Window::new(titulo, cw, ch) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    eprintln!("viewer: não foi possível criar a janela: {e}");
+                    return;
+                }
             }
-        },
+        }
     };
     let deadline = headless.map(|s| Instant::now() + Duration::from_secs(s));
 
