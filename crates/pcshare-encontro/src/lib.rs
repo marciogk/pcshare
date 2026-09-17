@@ -39,6 +39,7 @@ use pcshare_core::{Channel, Transport};
 use std::io;
 use std::net::SocketAddr;
 
+pub mod licencas;
 pub mod servidor;
 
 /// Tempo máximo esperando uma resposta do servidor de encontro.
@@ -53,10 +54,16 @@ const T_REGISTRO_OK: u8 = 3;
 const T_EMPARELHADO: u8 = 4;
 const T_INDISPONIVEL: u8 = 5;
 const T_OCUPADO: u8 = 6;
+const T_CONECTAR_LIC: u8 = 7;
+const T_LICENCA_INVALIDA: u8 = 8;
+const T_LICENCA_EXPIRADA: u8 = 9;
 
 /// Teto do ID na sinalização. O ID real tem nove dígitos; o limite existe só
 /// para um cabeçalho corrompido não pedir uma alocação absurda.
 const MAX_ID: usize = 64;
+
+/// Teto da chave de licença na sinalização. Mesma razão do [`MAX_ID`].
+const MAX_LICENCA: usize = 256;
 
 /// As mensagens trocadas com o servidor **antes** de o repasse começar.
 ///
@@ -85,6 +92,17 @@ pub enum Mensagem {
     /// "inexistente" evita que o operador fique trocando o ID à toa quando o
     /// problema é que um colega já está conectado.
     Ocupado,
+    /// Viewer → servidor: quero falar com este ID, e esta é minha licença.
+    ///
+    /// É o que sustenta a cobrança: quem **acessa** (operador) apresenta a
+    /// licença; quem é **acessado** (host) só faz [`Registrar`](Self::Registrar),
+    /// de graça. O servidor só confere a licença quando roda em modo de
+    /// cobrança (com um arquivo de licenças configurado).
+    ConectarComLicenca { id: String, licenca: String },
+    /// Servidor → viewer: licença ausente, desconhecida ou desativada.
+    LicencaInvalida,
+    /// Servidor → viewer: licença existe, mas a assinatura venceu.
+    LicencaExpirada,
 }
 
 impl Mensagem {
@@ -96,6 +114,9 @@ impl Mensagem {
             Self::Emparelhado => T_EMPARELHADO,
             Self::Indisponivel => T_INDISPONIVEL,
             Self::Ocupado => T_OCUPADO,
+            Self::ConectarComLicenca { .. } => T_CONECTAR_LIC,
+            Self::LicencaInvalida => T_LICENCA_INVALIDA,
+            Self::LicencaExpirada => T_LICENCA_EXPIRADA,
         }
     }
 
@@ -106,8 +127,20 @@ impl Mensagem {
         }
     }
 
-    /// `[tag u8][tamanho u16 LE][id utf8]`.
+    /// Mensagens de um campo: `[tag u8][tamanho u16 LE][id utf8]`.
+    /// `ConectarComLicenca` tem dois campos: `[tag][len_id][id][len_lic][lic]`.
     pub fn codificar(&self) -> Vec<u8> {
+        if let Self::ConectarComLicenca { id, licenca } = self {
+            let id = id.as_bytes();
+            let lic = licenca.as_bytes();
+            let mut v = Vec::with_capacity(id.len() + lic.len() + 5);
+            v.push(self.tag());
+            v.extend_from_slice(&(id.len() as u16).to_le_bytes());
+            v.extend_from_slice(id);
+            v.extend_from_slice(&(lic.len() as u16).to_le_bytes());
+            v.extend_from_slice(lic);
+            return v;
+        }
         let corpo = self.corpo().as_bytes();
         let mut v = Vec::with_capacity(corpo.len() + 3);
         v.push(self.tag());
@@ -120,6 +153,37 @@ impl Mensagem {
     /// nunca em pânico. É o mesmo cuidado do protocolo principal: bytes vindos
     /// da rede não podem derrubar quem os lê.
     pub fn decodificar(bytes: &[u8]) -> Option<Self> {
+        if bytes.is_empty() {
+            return None;
+        }
+        if bytes[0] == T_CONECTAR_LIC {
+            // [tag][len_id u16][id][len_lic u16][licenca]
+            if bytes.len() < 3 {
+                return None;
+            }
+            let len_id = u16::from_le_bytes([bytes[1], bytes[2]]) as usize;
+            if len_id > MAX_ID {
+                return None;
+            }
+            let fim_id = 3 + len_id;
+            if bytes.len() < fim_id + 2 {
+                return None;
+            }
+            let id = std::str::from_utf8(&bytes[3..fim_id]).ok()?;
+            let len_lic = u16::from_le_bytes([bytes[fim_id], bytes[fim_id + 1]]) as usize;
+            if len_lic > MAX_LICENCA {
+                return None;
+            }
+            let fim_lic = fim_id + 2 + len_lic;
+            if bytes.len() < fim_lic {
+                return None;
+            }
+            let lic = std::str::from_utf8(&bytes[fim_id + 2..fim_lic]).ok()?;
+            return Some(Self::ConectarComLicenca {
+                id: id.to_string(),
+                licenca: lic.to_string(),
+            });
+        }
         if bytes.len() < 3 {
             return None;
         }
@@ -135,6 +199,8 @@ impl Mensagem {
             T_EMPARELHADO => Some(Self::Emparelhado),
             T_INDISPONIVEL => Some(Self::Indisponivel),
             T_OCUPADO => Some(Self::Ocupado),
+            T_LICENCA_INVALIDA => Some(Self::LicencaInvalida),
+            T_LICENCA_EXPIRADA => Some(Self::LicencaExpirada),
             _ => None,
         }
     }
@@ -215,9 +281,23 @@ pub fn registrar_e_esperar(servidor: SocketAddr, id: &str) -> io::Result<QuicTra
 /// "não deu" manda o operador tentar de novo às cegas. Aqui, "máquina não
 /// encontrada" e "máquina ocupada" dizem o que fazer — conferir o ID, ou
 /// esperar o colega desconectar.
-pub fn conectar_por_id(servidor: SocketAddr, id: &str) -> io::Result<QuicTransport> {
+/// `licenca`: a chave do operador (assinante). `None` manda o `Conectar` antigo,
+/// sem licença — vale para a CLI, medições, e servidores em modo aberto. Em modo
+/// de cobrança o servidor recusa quem não apresenta uma licença válida.
+pub fn conectar_por_id(
+    servidor: SocketAddr,
+    id: &str,
+    licenca: Option<&str>,
+) -> io::Result<QuicTransport> {
     let mut t = QuicTransport::connect(servidor)?;
-    enviar(&mut t, &Mensagem::Conectar(id.to_string()))?;
+    let pedido = match licenca {
+        Some(l) => Mensagem::ConectarComLicenca {
+            id: id.to_string(),
+            licenca: l.to_string(),
+        },
+        None => Mensagem::Conectar(id.to_string()),
+    };
+    enviar(&mut t, &pedido)?;
     match receber(&mut t)? {
         Mensagem::Emparelhado => Ok(t),
         Mensagem::Indisponivel => Err(io::Error::new(
@@ -227,6 +307,14 @@ pub fn conectar_por_id(servidor: SocketAddr, id: &str) -> io::Result<QuicTranspo
         Mensagem::Ocupado => Err(io::Error::new(
             io::ErrorKind::AddrInUse,
             "máquina já está em outra sessão — tente de novo em instantes",
+        )),
+        Mensagem::LicencaInvalida => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "licença inválida — verifique a chave da sua assinatura",
+        )),
+        Mensagem::LicencaExpirada => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "assinatura expirada — renove para continuar acessando",
         )),
         outra => Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -278,6 +366,16 @@ mod tests {
             Mensagem::Emparelhado,
             Mensagem::Indisponivel,
             Mensagem::Ocupado,
+            Mensagem::ConectarComLicenca {
+                id: "895 570 225".into(),
+                licenca: "ABCD-1234-EFGH-5678".into(),
+            },
+            Mensagem::ConectarComLicenca {
+                id: "895570225".into(),
+                licenca: String::new(),
+            },
+            Mensagem::LicencaInvalida,
+            Mensagem::LicencaExpirada,
         ] {
             let bytes = m.codificar();
             assert_eq!(Mensagem::decodificar(&bytes), Some(m));

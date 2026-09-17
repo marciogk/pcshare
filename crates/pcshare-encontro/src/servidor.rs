@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use pcshare_core::Transport;
 use pcshare_core::quic::{QuicListener, QuicTransport};
 
+use crate::licencas::{Licencas, Veredito};
 use crate::{Mensagem, enviar, normalizar_id, receber};
 
 /// O que o servidor sabe a cada instante.
@@ -31,8 +32,17 @@ struct Estado {
 type Compartilhado = Arc<Mutex<Estado>>;
 
 /// Atende para sempre. Só retorna se o ponto de escuta morrer.
-pub fn servir(escuta: QuicListener) {
+///
+/// `licencas`: `Some` liga a **cobrança** — todo viewer precisa apresentar uma
+/// licença válida para conectar. `None` é o **modo aberto**: qualquer um conecta
+/// (o comportamento de sempre, e o padrão em desenvolvimento e testes).
+pub fn servir(escuta: QuicListener, licencas: Option<Licencas>) {
     let estado: Compartilhado = Arc::new(Mutex::new(Estado::default()));
+    if licencas.is_some() {
+        log("cobrança LIGADA: viewers precisam de licença válida");
+    } else {
+        log("modo aberto: sem cobrança (nenhum arquivo de licenças)");
+    }
     loop {
         match escuta.accept() {
             Ok(t) => {
@@ -40,7 +50,8 @@ pub fn servir(escuta: QuicListener) {
                 // bloqueia até 15 s, e fazer isso no laço de aceitação
                 // impediria a próxima conexão de entrar.
                 let estado = estado.clone();
-                std::thread::spawn(move || atender(t, estado));
+                let licencas = licencas.clone();
+                std::thread::spawn(move || atender(t, estado, licencas));
             }
             Err(e) => {
                 // `accept` já engole tentativas que não completam o handshake;
@@ -53,7 +64,7 @@ pub fn servir(escuta: QuicListener) {
 }
 
 /// Lê a intenção de quem acabou de conectar e a atende.
-fn atender(mut t: QuicTransport, estado: Compartilhado) {
+fn atender(mut t: QuicTransport, estado: Compartilhado, licencas: Option<Licencas>) {
     let quem = t.remote();
     let primeira = match receber(&mut t) {
         Ok(m) => m,
@@ -64,8 +75,14 @@ fn atender(mut t: QuicTransport, estado: Compartilhado) {
     };
 
     match primeira {
+        // O host se registra de graça — nunca apresenta licença.
         Mensagem::Registrar(id) => registrar(t, &id, estado),
-        Mensagem::Conectar(id) => conectar(t, &id, estado),
+        // Viewer sem licença: em modo aberto conecta; em cobrança, é recusado.
+        Mensagem::Conectar(id) => conectar(t, &id, None, estado, licencas),
+        // Viewer com licença: o operador que assina.
+        Mensagem::ConectarComLicenca { id, licenca } => {
+            conectar(t, &id, Some(licenca), estado, licencas)
+        }
         // Só host e viewer iniciam conversa; qualquer outra coisa é ruído ou
         // uma ponta confusa, e não há o que fazer com ela.
         outra => log(&format!("{quem}: primeira mensagem inesperada ({outra:?})")),
@@ -91,8 +108,34 @@ fn registrar(mut host: QuicTransport, id: &str, estado: Compartilhado) {
     }
 }
 
-/// Viewer pede um ID. Casa com o host, ou explica por que não deu.
-fn conectar(mut viewer: QuicTransport, id: &str, estado: Compartilhado) {
+/// Viewer pede um ID. Confere a licença (se houver cobrança), casa com o host,
+/// ou explica por que não deu.
+fn conectar(
+    mut viewer: QuicTransport,
+    id: &str,
+    licenca: Option<String>,
+    estado: Compartilhado,
+    licencas: Option<Licencas>,
+) {
+    // Portão da cobrança: antes de qualquer pareamento. Só roda quando há um
+    // arquivo de licenças; em modo aberto, passa direto.
+    if let Some(store) = &licencas {
+        let apresentada = licenca.as_deref().unwrap_or("");
+        match store.conferir(apresentada) {
+            Veredito::Ok => {}
+            Veredito::Invalida => {
+                log(&format!("{}: licença inválida, recusado", viewer.remote()));
+                let _ = enviar(&mut viewer, &Mensagem::LicencaInvalida);
+                return;
+            }
+            Veredito::Expirada => {
+                log(&format!("{}: licença expirada, recusado", viewer.remote()));
+                let _ = enviar(&mut viewer, &Mensagem::LicencaExpirada);
+                return;
+            }
+        }
+    }
+
     let chave = normalizar_id(id);
 
     let host = {

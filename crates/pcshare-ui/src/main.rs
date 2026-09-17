@@ -78,6 +78,21 @@ fn salvar_config(encontro: &str, recentes: &[Maquina]) {
     let _ = std::fs::write(dir.join("ui.txt"), s);
 }
 
+/// A chave de licença fica num arquivo próprio (`licenca.txt`), separada da
+/// configuração comum — assim é fácil protegê-la depois (DPAPI) sem mexer no
+/// resto. MVP: texto puro.
+fn carregar_licenca() -> String {
+    std::fs::read_to_string(pasta_pcshare().join("licenca.txt"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
+fn salvar_licenca(chave: &str) {
+    let dir = pasta_pcshare();
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(dir.join("licenca.txt"), chave.trim());
+}
+
 /// Reduz o ID a nove dígitos, ignorando espaços e pontuação. O usuário
 /// pode colar "737 071 101" ou "737071101" — os dois viram o mesmo.
 fn so_digitos(s: &str) -> String {
@@ -109,6 +124,8 @@ struct App {
     estado: Arc<Mutex<EstadoSessao>>,
     /// Logo carregado, se o arquivo existir.
     logo: Option<egui::TextureHandle>,
+    /// Chave de licença (assinatura) do operador.
+    licenca: String,
     status: String,
 }
 
@@ -133,6 +150,7 @@ impl App {
             alias_buffer: String::new(),
             estado: Arc::new(Mutex::new(EstadoSessao::default())),
             logo,
+            licenca: carregar_licenca(),
             status: String::new(),
         }
     }
@@ -201,6 +219,9 @@ impl App {
         let senha = self.senha.trim().to_string();
         let nome = self.nome_de(&id);
         let titulo = format!("PCShare — {nome}");
+        // Vazia = sem licença (None): serve para servidor em modo aberto; num
+        // servidor de cobrança, o próprio servidor recusa com mensagem clara.
+        let licenca = self.licenca.trim().to_string();
         let estado = self.estado.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
@@ -229,7 +250,8 @@ impl App {
                 }
                 ctx.request_repaint();
             };
-            let _ = pcshare_sessao::assistir_por_id(enc, &id, &senha, &titulo, relatar);
+            let lic = (!licenca.is_empty()).then_some(licenca.as_str());
+            let _ = pcshare_sessao::assistir_por_id(enc, &id, &senha, &titulo, lic, relatar);
         });
     }
 
@@ -408,6 +430,27 @@ impl eframe::App for App {
 
             ui.add_space(12.0);
             ui.collapsing("Configurações", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Chave de licença:");
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut self.licenca)
+                                .hint_text("cole a chave da sua assinatura")
+                                .desired_width(220.0),
+                        )
+                        .changed()
+                    {
+                        salvar_licenca(&self.licenca);
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "A chave que você recebe ao assinar. Necessária para acessar outras máquinas.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.label("Servidor de encontro:");
                     ui.text_edit_singleline(&mut self.encontro);

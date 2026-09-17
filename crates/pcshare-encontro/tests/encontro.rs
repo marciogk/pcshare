@@ -14,7 +14,8 @@ use pcshare_encontro::{Mensagem, enviar, receber, servidor::servir};
 fn servidor_de_teste() -> std::net::SocketAddr {
     let escuta = QuicListener::bind("127.0.0.1:0".parse().unwrap()).expect("bind");
     let addr = escuta.local_addr().expect("local_addr");
-    std::thread::spawn(move || servir(escuta));
+    // `None`: modo aberto (sem cobrança), como nos testes de sinalização pura.
+    std::thread::spawn(move || servir(escuta, None));
     addr
 }
 

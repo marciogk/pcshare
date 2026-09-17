@@ -149,17 +149,21 @@ pub enum Progresso {
 ///
 /// `titulo` vai para a barra de título da janela de sessão (o apelido da
 /// máquina, quando houver). `relatar` recebe cada mudança de estágio.
+///
+/// `licenca` é a chave da assinatura do operador (`None`/vazia = sem licença; em
+/// servidor de cobrança, recusado com mensagem clara em `Progresso::Falhou`).
 pub fn assistir_por_id(
     encontro: SocketAddr,
     id: &str,
     senha: &str,
     titulo: &str,
+    licenca: Option<&str>,
     mut relatar: impl FnMut(Progresso),
 ) -> std::io::Result<()> {
     START.get_or_init(Instant::now);
     let identity = load_identity().map_err(erro_io)?;
     relatar(Progresso::Procurando);
-    let t = match pcshare_encontro::conectar_por_id(encontro, id) {
+    let t = match pcshare_encontro::conectar_por_id(encontro, id, licenca) {
         Ok(t) => t,
         Err(e) => {
             relatar(Progresso::Falhou(e.to_string()));
@@ -280,7 +284,9 @@ pub fn run(args: Vec<String>) {
                     return;
                 };
                 println!("procurando a máquina {id} pelo encontro {enc}");
-                match pcshare_encontro::conectar_por_id(enc, &id) {
+                // `--licenca <chave>` para testar a cobrança pela CLI.
+                let licenca = arg_value("--licenca");
+                match pcshare_encontro::conectar_por_id(enc, &id, licenca.as_deref()) {
                     Ok(t) => assistir(t, &identity, &password, plaintext, &format!("PCShare — {id}")),
                     // Mensagem clara em vez de pânico: aqui o erro é operacional
                     // (ID errado, máquina offline, ocupada), não um defeito.

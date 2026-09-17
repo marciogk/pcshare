@@ -1980,6 +1980,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pcshare-agente"
+version = "0.0.1"
+dependencies = [
+ "eframe",
+ "pcshare-core",
+ "pcshare-sessao",
+]
+
+[[package]]
 name = "pcshare-capture"
 version = "0.0.1"
 dependencies = [

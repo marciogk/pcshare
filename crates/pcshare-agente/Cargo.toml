@@ -1,0 +1,15 @@
+[package]
+name = "pcshare-agente"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "pcshare-agente"
+path = "src/main.rs"
+
+[dependencies]
+pcshare-core = { version = "0.0.1", path = "../pcshare-core" }
+pcshare-sessao = { version = "0.0.1", path = "../pcshare-sessao" }
+eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts"] }
