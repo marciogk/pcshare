@@ -11,3 +11,4 @@ path = "src/main.rs"
 
 [dependencies]
 pcshare-core = { version = "0.0.1", path = "../pcshare-core" }
+rand = "0.10.2"

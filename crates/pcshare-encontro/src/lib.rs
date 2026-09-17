@@ -39,6 +39,7 @@ use pcshare_core::{Channel, Transport};
 use std::io;
 use std::net::SocketAddr;
 
+pub mod admin;
 pub mod licencas;
 pub mod servidor;
 

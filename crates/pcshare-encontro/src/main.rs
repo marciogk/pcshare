@@ -26,6 +26,12 @@ const BIND_PADRAO: &str = "0.0.0.0:7100";
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
+    // Subcomando de administração de licenças, no mesmo binário: emitir/listar/
+    // renovar/revogar chaves. Não sobe o servidor.
+    if args.first().map(String::as_str) == Some("licenca") {
+        std::process::exit(pcshare_encontro::admin::executar(&args[1..]));
+    }
+
     // Primeiro argumento posicional (que não seja uma opção) é o endereço.
     let endereco = args
         .iter()

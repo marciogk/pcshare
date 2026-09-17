@@ -2023,6 +2023,7 @@ name = "pcshare-encontro"
 version = "0.0.1"
 dependencies = [
  "pcshare-core",
+ "rand",
 ]
 
 [[package]]

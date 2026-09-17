@@ -80,7 +80,7 @@ impl Licencas {
 }
 
 /// Dia de hoje (UTC) em dias desde 1970-01-01.
-fn hoje_em_dias() -> i64 {
+pub(crate) fn hoje_em_dias() -> i64 {
     let segundos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -94,27 +94,52 @@ fn prazo_dias(validade: &str) -> Option<i64> {
     if validade.is_empty() {
         return None;
     }
-    let mut p = validade.split('-');
-    let y = p.next().and_then(|s| s.parse::<i64>().ok());
-    let m = p.next().and_then(|s| s.parse::<i64>().ok());
-    let d = p.next().and_then(|s| s.parse::<i64>().ok());
-    match (y, m, d) {
-        (Some(y), Some(m), Some(d)) if (1..=12).contains(&m) && (1..=31).contains(&d) => {
-            Some(dias_da_data(y, m, d))
-        }
-        _ => Some(i64::MIN),
+    dias_de_texto(validade).or(Some(i64::MIN))
+}
+
+/// `AAAA-MM-DD` → dias desde a época, ou `None` se não for uma data válida.
+pub(crate) fn dias_de_texto(validade: &str) -> Option<i64> {
+    let mut p = validade.trim().split('-');
+    let y = p.next()?.parse::<i64>().ok()?;
+    let m = p.next()?.parse::<i64>().ok()?;
+    let d = p.next()?.parse::<i64>().ok()?;
+    if (1..=12).contains(&m) && (1..=31).contains(&d) {
+        Some(dias_da_data(y, m, d))
+    } else {
+        None
     }
 }
 
 /// Dias desde 1970-01-01 para uma data do calendário (algoritmo de Howard
 /// Hinnant, `days_from_civil`). Evita depender de um crate de datas.
-fn dias_da_data(y: i64, m: i64, d: i64) -> i64 {
+pub(crate) fn dias_da_data(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400;
     let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     era * 146_097 + doe - 719_468
+}
+
+/// Inverso de [`dias_da_data`] (`civil_from_days` de Hinnant): dias desde a
+/// época → `(ano, mês, dia)`.
+pub(crate) fn data_de_dias(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// Dias desde a época → `AAAA-MM-DD`.
+pub(crate) fn formatar_data(dias: i64) -> String {
+    let (y, m, d) = data_de_dias(dias);
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 #[cfg(test)]
@@ -167,6 +192,17 @@ mod tests {
         assert_eq!(dias_da_data(1970, 1, 1), 0);
         assert_eq!(dias_da_data(1970, 1, 2), 1);
         assert_eq!(dias_da_data(2000, 1, 1), 10_957);
+    }
+
+    #[test]
+    fn ida_e_volta_da_data() {
+        // dias -> (y,m,d) -> dias fecha, e o texto formata certo.
+        for dias in [0, 1, 10_957, 20_000, 25_000] {
+            let (y, m, d) = data_de_dias(dias);
+            assert_eq!(dias_da_data(y, m, d), dias, "dia {dias}");
+        }
+        assert_eq!(formatar_data(0), "1970-01-01");
+        assert_eq!(formatar_data(10_957), "2000-01-01");
     }
 
     /// Arquivo temporário mínimo, só para os testes, sem puxar um crate.
