@@ -107,12 +107,15 @@ struct App {
     alias_buffer: String,
     /// Status da sessão em curso, atualizado pela thread do motor.
     estado: Arc<Mutex<EstadoSessao>>,
+    /// Logo carregado, se o arquivo existir.
+    logo: Option<egui::TextureHandle>,
     status: String,
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         aplicar_tema(&cc.egui_ctx);
+        let logo = carregar_logo(&cc.egui_ctx);
         let (id_local, fingerprint) = pcshare_sessao::identidade_local()
             .unwrap_or_else(|| ("— erro ao carregar a identidade —".into(), String::new()));
         let (encontro, recentes) = carregar_config();
@@ -129,6 +132,7 @@ impl App {
             editando: None,
             alias_buffer: String::new(),
             estado: Arc::new(Mutex::new(EstadoSessao::default())),
+            logo,
             status: String::new(),
         }
     }
@@ -267,9 +271,19 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add_space(6.0);
-            ui.heading("PCShare");
-            ui.label(egui::RichText::new("Acesso remoto").weak());
+            ui.add_space(8.0);
+            // Logo, se o arquivo existir; senão, o título em texto.
+            if let Some(tex) = &self.logo {
+                let largura = ui.available_width().min(260.0);
+                let size = tex.size_vec2();
+                let escala = (largura / size.x).min(1.0);
+                ui.vertical_centered(|ui| {
+                    ui.image(egui::load::SizedTexture::new(tex.id(), size * escala));
+                });
+            } else {
+                ui.heading("PCShare");
+                ui.label(egui::RichText::new("Acesso remoto").weak());
+            }
             ui.add_space(12.0);
 
             // ---- esta máquina ----
@@ -437,25 +451,81 @@ impl eframe::App for App {
     }
 }
 
-/// Azul de destaque, usado no botão principal e na seleção.
-const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x3B, 0x82, 0xF6);
+use egui::Color32;
 
-/// Aplica um tema escuro consistente, independente do tema do sistema, com um
-/// leve toque de destaque e um espaçamento mais folgado que o padrão.
+/// Paleta azul do PCShare (do próprio logo).
+const FUNDO: Color32 = Color32::from_rgb(0x0E, 0x28, 0x57); // azul escuro do fundo
+const CARTAO: Color32 = Color32::from_rgb(0x17, 0x3A, 0x76); // cartões/grupos
+const CAMPO: Color32 = Color32::from_rgb(0x0A, 0x1F, 0x45); // fundo dos campos de texto
+const BOTAO: Color32 = Color32::from_rgb(0x22, 0x4A, 0x8A); // botões comuns
+const BOTAO_HOVER: Color32 = Color32::from_rgb(0x2A, 0x59, 0xA3);
+const ACCENT: Color32 = Color32::from_rgb(0x33, 0xA8, 0xE8); // ciano do logo, no botão Conectar
+
+/// Tema azul do PCShare, letras brancas, fixo (independe do tema do sistema).
 fn aplicar_tema(ctx: &egui::Context) {
-    // Fixa o tema escuro. Sem isto, o eframe segue o tema do sistema e
-    // re-deriva as cores a cada quadro, desfazendo o `set_visuals` abaixo.
+    // Fixa o tema. Sem isto, o eframe segue o sistema e re-deriva as cores a
+    // cada quadro, desfazendo o `set_visuals` abaixo.
     ctx.set_theme(egui::ThemePreference::Dark);
     let mut v = egui::Visuals::dark();
+    v.override_text_color = Some(Color32::WHITE); // letras brancas para contrastar
+    v.panel_fill = FUNDO;
+    v.window_fill = FUNDO;
+    v.window_stroke = egui::Stroke::new(1.0, CARTAO);
+    v.extreme_bg_color = CAMPO;
+    v.faint_bg_color = CARTAO;
     v.hyperlink_color = ACCENT;
-    v.selection.bg_fill = ACCENT.gamma_multiply(0.35);
+    v.selection.bg_fill = ACCENT.gamma_multiply(0.4);
     v.selection.stroke = egui::Stroke::new(1.0, ACCENT);
+
+    // Grupos (os cartões "ESTA MÁQUINA" etc.)
+    v.widgets.noninteractive.bg_fill = CARTAO;
+    v.widgets.noninteractive.weak_bg_fill = CARTAO;
+    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, Color32::from_rgb(0x27, 0x50, 0x92));
+    // Botões comuns
+    for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active] {
+        w.fg_stroke.color = Color32::WHITE;
+    }
+    v.widgets.inactive.bg_fill = BOTAO;
+    v.widgets.inactive.weak_bg_fill = BOTAO;
+    v.widgets.hovered.bg_fill = BOTAO_HOVER;
+    v.widgets.hovered.weak_bg_fill = BOTAO_HOVER;
+    v.widgets.active.bg_fill = ACCENT;
+    v.widgets.active.weak_bg_fill = ACCENT;
     ctx.set_visuals(v);
 
     let mut style = (*ctx.style()).clone();
     style.spacing.item_spacing = egui::vec2(8.0, 8.0);
     style.spacing.button_padding = egui::vec2(12.0, 7.0);
     ctx.set_style(style);
+}
+
+/// Carrega o logo de um arquivo, se existir. Procura ao lado do executável e em
+/// `%LOCALAPPDATA%\PCShare\`, aceitando `logo.png` ou `logo.jpg`. Devolve `None`
+/// sem erro se não achar — a interface cai no título em texto.
+fn carregar_logo(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    let mut candidatos = Vec::new();
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        candidatos.push(dir.join("logo.png"));
+        candidatos.push(dir.join("logo.jpg"));
+    }
+    candidatos.push(pasta_pcshare().join("logo.png"));
+    candidatos.push(pasta_pcshare().join("logo.jpg"));
+
+    for caminho in candidatos {
+        let Ok(bytes) = std::fs::read(&caminho) else {
+            continue;
+        };
+        let Ok(img) = image::load_from_memory(&bytes) else {
+            continue;
+        };
+        let rgba = img.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        let color = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+        return Some(ctx.load_texture("logo", color, egui::TextureOptions::LINEAR));
+    }
+    None
 }
 
 fn main() -> eframe::Result<()> {

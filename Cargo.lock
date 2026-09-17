@@ -1251,6 +1251,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -2064,6 +2066,7 @@ name = "pcshare-ui"
 version = "0.0.1"
 dependencies = [
  "eframe",
+ "image",
  "pcshare-core",
  "pcshare-sessao",
 ]

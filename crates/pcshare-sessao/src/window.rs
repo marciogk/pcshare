@@ -146,9 +146,11 @@ impl Window {
             let hinst: HINSTANCE = instance.into();
             let font = GetStockObject(DEFAULT_GUI_FONT);
             let mut x = 8;
+            // As setas fazem de ícone: ↑ envia (sobe para o host), ↓ baixa
+            // (desce do host). Rendem bem na fonte padrão dos botões.
             for (texto, id, largura) in [
-                (w!("Enviar arquivo"), ID_ENVIAR, 120),
-                (w!("Baixar arquivo"), ID_BAIXAR, 120),
+                (w!("↑ Enviar arquivo"), ID_ENVIAR, 130),
+                (w!("↓ Baixar arquivo"), ID_BAIXAR, 130),
                 (w!("Ctrl+Alt+Del"), ID_SAS, 110),
             ] {
                 let botao = CreateWindowExW(
