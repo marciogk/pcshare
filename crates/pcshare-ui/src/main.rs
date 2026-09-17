@@ -453,44 +453,18 @@ impl eframe::App for App {
 
 use egui::Color32;
 
-/// Paleta azul do PCShare (do próprio logo).
-const FUNDO: Color32 = Color32::from_rgb(0x0E, 0x28, 0x57); // azul escuro do fundo
-const CARTAO: Color32 = Color32::from_rgb(0x17, 0x3A, 0x76); // cartões/grupos
-const CAMPO: Color32 = Color32::from_rgb(0x0A, 0x1F, 0x45); // fundo dos campos de texto
-const BOTAO: Color32 = Color32::from_rgb(0x22, 0x4A, 0x8A); // botões comuns
-const BOTAO_HOVER: Color32 = Color32::from_rgb(0x2A, 0x59, 0xA3);
-const ACCENT: Color32 = Color32::from_rgb(0x33, 0xA8, 0xE8); // ciano do logo, no botão Conectar
+/// Azul do botão principal e da seleção.
+const ACCENT: Color32 = Color32::from_rgb(0x2E, 0x6F, 0xD6);
 
-/// Tema azul do PCShare, letras brancas, fixo (independe do tema do sistema).
+/// Tema claro (como no início), fixo. O logo do PCShare tem letras escuras, que
+/// ficam legíveis sobre o fundo claro — o fundo azul as apagava.
 fn aplicar_tema(ctx: &egui::Context) {
-    // Fixa o tema. Sem isto, o eframe segue o sistema e re-deriva as cores a
-    // cada quadro, desfazendo o `set_visuals` abaixo.
-    ctx.set_theme(egui::ThemePreference::Dark);
-    let mut v = egui::Visuals::dark();
-    v.override_text_color = Some(Color32::WHITE); // letras brancas para contrastar
-    v.panel_fill = FUNDO;
-    v.window_fill = FUNDO;
-    v.window_stroke = egui::Stroke::new(1.0, CARTAO);
-    v.extreme_bg_color = CAMPO;
-    v.faint_bg_color = CARTAO;
+    // Fixa o tema claro, independente do tema do sistema.
+    ctx.set_theme(egui::ThemePreference::Light);
+    let mut v = egui::Visuals::light();
     v.hyperlink_color = ACCENT;
-    v.selection.bg_fill = ACCENT.gamma_multiply(0.4);
+    v.selection.bg_fill = ACCENT.gamma_multiply(0.3);
     v.selection.stroke = egui::Stroke::new(1.0, ACCENT);
-
-    // Grupos (os cartões "ESTA MÁQUINA" etc.)
-    v.widgets.noninteractive.bg_fill = CARTAO;
-    v.widgets.noninteractive.weak_bg_fill = CARTAO;
-    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, Color32::from_rgb(0x27, 0x50, 0x92));
-    // Botões comuns
-    for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active] {
-        w.fg_stroke.color = Color32::WHITE;
-    }
-    v.widgets.inactive.bg_fill = BOTAO;
-    v.widgets.inactive.weak_bg_fill = BOTAO;
-    v.widgets.hovered.bg_fill = BOTAO_HOVER;
-    v.widgets.hovered.weak_bg_fill = BOTAO_HOVER;
-    v.widgets.active.bg_fill = ACCENT;
-    v.widgets.active.weak_bg_fill = ACCENT;
     ctx.set_visuals(v);
 
     let mut style = (*ctx.style()).clone();
