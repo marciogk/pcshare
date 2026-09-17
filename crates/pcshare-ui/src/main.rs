@@ -464,7 +464,7 @@ fn aplicar_tema(ctx: &egui::Context) {
     let mut v = egui::Visuals::light();
     v.hyperlink_color = ACCENT;
     v.selection.bg_fill = ACCENT.gamma_multiply(0.3);
-    v.selection.stroke = egui::Stroke::new(1.0, ACCENT);
+    v.selection.stroke = egui::Stroke::new(1.0_f32, ACCENT);
     ctx.set_visuals(v);
 
     let mut style = (*ctx.style()).clone();

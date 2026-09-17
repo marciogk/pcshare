@@ -579,7 +579,7 @@ fn medir_latencia<T: Transport>(mut t: T, amostras: usize, relogio: fn() -> i64)
     marcador.paint(false);
 
     let limite = Instant::now() + Duration::from_secs(60);
-    let mut estabilizou_ate = Instant::now() + Duration::from_millis(400);
+    let estabilizou_ate = Instant::now() + Duration::from_millis(400);
 
     while medidas.len() < amostras && Instant::now() < limite {
         marcador.pump();
