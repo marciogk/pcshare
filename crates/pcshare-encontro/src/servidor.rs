@@ -170,17 +170,21 @@ fn conectar(
         }
     };
 
-    // Avisa os dois que o par chegou. Este é o sinal para cada lado começar o
-    // handshake Noise: o host como respondedor, o viewer como iniciador.
-    let ok_host = enviar(&mut host, &Mensagem::Emparelhado).is_ok();
-    let ok_viewer = enviar(&mut viewer, &Mensagem::Emparelhado).is_ok();
+    // Avisa cada um que o par chegou, e passa a ele o **endereço público do
+    // outro** — o que cada lado precisa para tentar furar o NAT e conectar
+    // direto. Se o furo falhar, os dois voltam a usar estas mesmas conexões e o
+    // repasse abaixo os atende: o relay segue como reserva.
+    let endereco_host = host.remote().to_string();
+    let endereco_viewer = viewer.remote().to_string();
+    let ok_host = enviar(&mut host, &Mensagem::EmparelhadoCom(endereco_viewer)).is_ok();
+    let ok_viewer = enviar(&mut viewer, &Mensagem::EmparelhadoCom(endereco_host)).is_ok();
     if !ok_host || !ok_viewer {
         log(&format!("'{chave}': um dos lados caiu antes de emparelhar"));
         soltar_ocupado(&estado, &chave);
         return;
     }
 
-    log(&format!("'{chave}': emparelhado, repassando"));
+    log(&format!("'{chave}': emparelhado, repassando (reserva)"));
     repassar(host, viewer);
     soltar_ocupado(&estado, &chave);
     log(&format!("'{chave}': sessão encerrada"));

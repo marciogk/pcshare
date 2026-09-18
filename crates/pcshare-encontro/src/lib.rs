@@ -34,10 +34,11 @@
 //! com o servidor antes de o repasse começar. O servidor em si é o binário
 //! `main.rs`; religar host e viewer para falá-lo é dos crates deles.
 
-use pcshare_core::quic::QuicTransport;
+use pcshare_core::quic::{QuicEndpoint, QuicTransport};
 use pcshare_core::{Channel, Transport};
 use std::io;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 pub mod admin;
 pub mod licencas;
@@ -47,7 +48,15 @@ pub mod servidor;
 ///
 /// Vale para cada troca da sinalização, não para a sessão. Um servidor mudo
 /// por mais que isto é um servidor que não vai responder.
-pub const TIMEOUT_SINAL: std::time::Duration = std::time::Duration::from_secs(15);
+pub const TIMEOUT_SINAL: Duration = Duration::from_secs(15);
+
+/// Prazo para completar a conexão ao servidor de encontro.
+const TIMEOUT_CONECTA: Duration = Duration::from_secs(10);
+
+/// Prazo do furo de NAT: quanto se espera pela conexão direta antes de desistir
+/// e usar o relay. Curto de propósito — a direta, quando funciona, sobe em um
+/// par de RTTs; esperar mais só atrasaria a queda para o relay.
+const TIMEOUT_FURO: Duration = Duration::from_secs(3);
 
 const T_REGISTRAR: u8 = 1;
 const T_CONECTAR: u8 = 2;
@@ -58,6 +67,7 @@ const T_OCUPADO: u8 = 6;
 const T_CONECTAR_LIC: u8 = 7;
 const T_LICENCA_INVALIDA: u8 = 8;
 const T_LICENCA_EXPIRADA: u8 = 9;
+const T_EMPARELHADO_COM: u8 = 10;
 
 /// Teto do ID na sinalização. O ID real tem nove dígitos; o limite existe só
 /// para um cabeçalho corrompido não pedir uma alocação absurda.
@@ -81,6 +91,12 @@ pub enum Mensagem {
     RegistroOk,
     /// Servidor → ambos: seu par chegou. A partir daqui, tudo é repassado.
     Emparelhado,
+    /// Servidor → ambos: seu par chegou, e este é o **endereço público** dele
+    /// (`ip:porta`, como o servidor o vê). Com ele, os dois tentam furar o NAT
+    /// e conectar **direto**, sem o relay. Se o furo falhar, caem no repasse,
+    /// que segue disponível — daí esta mensagem não substituir o
+    /// [`Emparelhado`](Self::Emparelhado), e sim carregar o extra.
+    EmparelhadoCom(String),
     /// Servidor → viewer: esse ID não está registrado em lugar nenhum.
     ///
     /// A máquina remota pode estar desligada, sem rede, ou com o serviço
@@ -118,12 +134,13 @@ impl Mensagem {
             Self::ConectarComLicenca { .. } => T_CONECTAR_LIC,
             Self::LicencaInvalida => T_LICENCA_INVALIDA,
             Self::LicencaExpirada => T_LICENCA_EXPIRADA,
+            Self::EmparelhadoCom(_) => T_EMPARELHADO_COM,
         }
     }
 
     fn corpo(&self) -> &str {
         match self {
-            Self::Registrar(id) | Self::Conectar(id) => id,
+            Self::Registrar(id) | Self::Conectar(id) | Self::EmparelhadoCom(id) => id,
             _ => "",
         }
     }
@@ -202,6 +219,7 @@ impl Mensagem {
             T_OCUPADO => Some(Self::Ocupado),
             T_LICENCA_INVALIDA => Some(Self::LicencaInvalida),
             T_LICENCA_EXPIRADA => Some(Self::LicencaExpirada),
+            T_EMPARELHADO_COM => Some(Self::EmparelhadoCom(corpo.to_string())),
             _ => None,
         }
     }
@@ -260,9 +278,13 @@ pub fn receber<T: Transport>(t: &mut T) -> io::Result<Mensagem> {
 /// a conexão com o servidor cair enquanto se espera, isto retorna erro, e o
 /// host deve reconectar e registrar-se de novo.
 pub fn registrar_e_esperar(servidor: SocketAddr, id: &str) -> io::Result<QuicTransport> {
-    let mut t = QuicTransport::connect(servidor)?;
-    enviar(&mut t, &Mensagem::Registrar(id.to_string()))?;
-    match receber(&mut t)? {
+    // Um endpoint só, reusado para o encontro e para a direta — é o que faz o
+    // furo casar. O host aceita a conexão direta do viewer, então precisa da
+    // capacidade de servidor.
+    let endpoint = QuicEndpoint::abrir_servidor()?;
+    let mut relay = endpoint.conectar(servidor, TIMEOUT_CONECTA)?;
+    enviar(&mut relay, &Mensagem::Registrar(id.to_string()))?;
+    match receber(&mut relay)? {
         Mensagem::RegistroOk => {}
         outra => {
             return Err(io::Error::new(
@@ -271,8 +293,10 @@ pub fn registrar_e_esperar(servidor: SocketAddr, id: &str) -> io::Result<QuicTra
             ));
         }
     }
-    esperar_emparelhado(&mut t)?;
-    Ok(t)
+    // Espera o viewer (sem prazo). Devolve o endereço público dele, ou `None`
+    // se o servidor for antigo (só `Emparelhado`) — aí não há furo, só relay.
+    let par = esperar_par(&mut relay)?;
+    Ok(furar_ou_relay(par, relay, |peer| endpoint.aceitar_furando(peer, TIMEOUT_FURO)))
 }
 
 /// Viewer: conecta ao encontro e pede `id`. Devolve o transporte emparelhado,
@@ -290,7 +314,6 @@ pub fn conectar_por_id(
     id: &str,
     licenca: Option<&str>,
 ) -> io::Result<QuicTransport> {
-    let mut t = QuicTransport::connect(servidor)?;
     let pedido = match licenca {
         Some(l) => Mensagem::ConectarComLicenca {
             id: id.to_string(),
@@ -298,42 +321,89 @@ pub fn conectar_por_id(
         },
         None => Mensagem::Conectar(id.to_string()),
     };
-    enviar(&mut t, &pedido)?;
-    match receber(&mut t)? {
-        Mensagem::Emparelhado => Ok(t),
-        Mensagem::Indisponivel => Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "máquina não encontrada — confira o ID, ou ela pode estar desligada ou sem rede",
-        )),
-        Mensagem::Ocupado => Err(io::Error::new(
-            io::ErrorKind::AddrInUse,
-            "máquina já está em outra sessão — tente de novo em instantes",
-        )),
-        Mensagem::LicencaInvalida => Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "licença inválida — verifique a chave da sua assinatura",
-        )),
-        Mensagem::LicencaExpirada => Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "assinatura expirada — renove para continuar acessando",
-        )),
-        outra => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("servidor de encontro respondeu {outra:?}"),
-        )),
+    let endpoint = QuicEndpoint::abrir_cliente()?;
+    let mut relay = endpoint.conectar(servidor, TIMEOUT_CONECTA)?;
+    enviar(&mut relay, &pedido)?;
+    let par = match receber(&mut relay)? {
+        Mensagem::EmparelhadoCom(addr) => Some(addr),
+        // Servidor antigo, sem endereço: sem furo, só relay.
+        Mensagem::Emparelhado => None,
+        Mensagem::Indisponivel => {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "máquina não encontrada — confira o ID, ou ela pode estar desligada ou sem rede",
+            ));
+        }
+        Mensagem::Ocupado => {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                "máquina já está em outra sessão — tente de novo em instantes",
+            ));
+        }
+        Mensagem::LicencaInvalida => {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "licença inválida — verifique a chave da sua assinatura",
+            ));
+        }
+        Mensagem::LicencaExpirada => {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "assinatura expirada — renove para continuar acessando",
+            ));
+        }
+        outra => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("servidor de encontro respondeu {outra:?}"),
+            ));
+        }
+    };
+    // O viewer é o iniciador da direta: conecta ao endereço do host.
+    Ok(furar_ou_relay(par, relay, |peer| {
+        endpoint.conectar(peer, TIMEOUT_FURO)
+    }))
+}
+
+/// Escolhe o transporte da sessão. Com o endereço do par e uma `tentativa`
+/// direta que sobe, usa a **direta** (e derruba o relay para não segurá-lo à
+/// toa); senão, o **relay** pelo servidor. Os dois lados usam a mesma lógica com
+/// papéis diferentes (o viewer conecta; o host aceita e fura).
+fn furar_ou_relay(
+    par: Option<String>,
+    relay: QuicTransport,
+    tentativa: impl FnOnce(SocketAddr) -> io::Result<QuicTransport>,
+) -> QuicTransport {
+    let Some(addr) = par else {
+        return relay;
+    };
+    let Ok(peer) = addr.parse::<SocketAddr>() else {
+        eprintln!("encontro: endereço do par ilegível ('{addr}'); usando relay");
+        return relay;
+    };
+    match tentativa(peer) {
+        Ok(direta) => {
+            println!("encontro: conexão DIRETA com {peer} — sem passar pelo servidor");
+            drop(relay);
+            direta
+        }
+        Err(_) => {
+            println!("encontro: furo de NAT não vingou; usando o relay pelo servidor");
+            relay
+        }
     }
 }
 
-/// Espera o [`Mensagem::Emparelhado`], **sem prazo**.
-///
-/// Separado de [`receber`] de propósito: aquele tem teto de 15 s, certo para
-/// uma resposta que o servidor dá na hora, errado para uma espera que dura o
-/// que durar até alguém do outro lado querer conectar.
-fn esperar_emparelhado<T: Transport>(t: &mut T) -> io::Result<()> {
+/// Espera o par chegar, **sem prazo**, e devolve o endereço público dele
+/// (`Some`), ou `None` se o servidor mandar o `Emparelhado` antigo (sem
+/// endereço). Separado de [`receber`] de propósito: aquele tem teto de 15 s,
+/// errado para uma espera que dura o que durar até alguém querer conectar.
+fn esperar_par<T: Transport>(t: &mut T) -> io::Result<Option<String>> {
     loop {
         match t.poll()? {
             Some((Channel::Control, dados)) => match Mensagem::decodificar(&dados) {
-                Some(Mensagem::Emparelhado) => return Ok(()),
+                Some(Mensagem::EmparelhadoCom(addr)) => return Ok(Some(addr)),
+                Some(Mensagem::Emparelhado) => return Ok(None),
                 Some(outra) => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -349,7 +419,7 @@ fn esperar_emparelhado<T: Transport>(t: &mut T) -> io::Result<()> {
             },
             // Mídia antes do emparelhamento é ruído; ignora e segue esperando.
             Some(_) => {}
-            None => std::thread::sleep(std::time::Duration::from_millis(20)),
+            None => std::thread::sleep(Duration::from_millis(20)),
         }
     }
 }
@@ -377,6 +447,7 @@ mod tests {
             },
             Mensagem::LicencaInvalida,
             Mensagem::LicencaExpirada,
+            Mensagem::EmparelhadoCom("189.40.122.7:51820".into()),
         ] {
             let bytes = m.codificar();
             assert_eq!(Mensagem::decodificar(&bytes), Some(m));

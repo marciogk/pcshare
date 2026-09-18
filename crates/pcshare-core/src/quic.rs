@@ -133,6 +133,100 @@ impl QuicListener {
     }
 }
 
+/// Um endpoint reutilizado para **duas** conexões ao mesmo tempo: a do servidor
+/// de encontro e a **direta** com o outro lado (furo de NAT).
+///
+/// O ponto todo é que as duas saem do **mesmo socket** — logo, da mesma porta
+/// local. O NAT dá a essa porta um único mapeamento externo, o mesmo que o
+/// encontro observou; então, quando os dois lados furam um ao outro, os pacotes
+/// caem no mapeamento certo e a conexão direta se forma. Um endpoint por
+/// conexão (como faz [`QuicTransport::connect`]) usaria portas diferentes e o
+/// furo nunca casaria.
+pub struct QuicEndpoint {
+    endpoint: Endpoint,
+    rt: Arc<tokio::runtime::Runtime>,
+}
+
+impl QuicEndpoint {
+    /// Endpoint **só-cliente** (o viewer): conecta ao encontro e ao host, mas
+    /// não aceita — o que também impede o *connect* de furo do host de virar
+    /// uma segunda conexão.
+    pub fn abrir_cliente() -> io::Result<Self> {
+        Self::abrir(false)
+    }
+
+    /// Endpoint **cliente + servidor** (o host): conecta ao encontro, aceita a
+    /// conexão direta do viewer, e ainda conecta ao viewer só para furar o NAT.
+    pub fn abrir_servidor() -> io::Result<Self> {
+        Self::abrir(true)
+    }
+
+    fn abrir(servidor: bool) -> io::Result<Self> {
+        let bind: SocketAddr = "0.0.0.0:0".parse().unwrap();
+        let rt = runtime()?;
+        let endpoint = {
+            let _guard = rt.enter();
+            if servidor {
+                let mut ep = server_endpoint(bind)?;
+                ep.set_default_client_config(client_config()?);
+                ep
+            } else {
+                client_endpoint(bind)?
+            }
+        };
+        Ok(Self {
+            endpoint,
+            rt: Arc::new(rt),
+        })
+    }
+
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.endpoint.local_addr()
+    }
+
+    /// Conecta a `remote`, desistindo depois de `prazo`. Serve para o encontro
+    /// (VPS) e para o viewer→host direto.
+    pub fn conectar(&self, remote: SocketAddr, prazo: Duration) -> io::Result<QuicTransport> {
+        let ep = self.endpoint.clone();
+        let conn = self.rt.block_on(async move {
+            tokio::time::timeout(prazo, async move {
+                ep.connect(remote, "pcshare").map_err(other)?.await.map_err(other)
+            })
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "conexão não completou no prazo"))?
+        })?;
+        QuicTransport::spawn(self.rt.clone(), conn, false)
+    }
+
+    /// Host: abre o próprio NAT com um *connect* descartável a `peer` (o viewer
+    /// é só-cliente e não aceita, então esse connect falha sozinho — serve só de
+    /// soco no NAT) e, ao mesmo tempo, **aceita** a conexão real do viewer, com
+    /// `prazo`.
+    pub fn aceitar_furando(&self, peer: SocketAddr, prazo: Duration) -> io::Result<QuicTransport> {
+        // Soco no NAT, em segundo plano.
+        let ep_soco = self.endpoint.clone();
+        self.rt.spawn(async move {
+            if let Ok(c) = ep_soco.connect(peer, "pcshare") {
+                let _ = c.await; // não completa; só os pacotes de saída importam
+            }
+        });
+
+        let ep = self.endpoint.clone();
+        let conn = self.rt.block_on(async move {
+            tokio::time::timeout(prazo, async move {
+                let inc = ep
+                    .accept()
+                    .await
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "endpoint fechado"))?;
+                inc.await.map_err(other)
+            })
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "ninguém conectou no prazo"))?
+        })?;
+        QuicTransport::spawn(self.rt.clone(), conn, true)
+    }
+}
+
 impl QuicTransport {
 
     pub fn connect(remote: SocketAddr) -> io::Result<Self> {
@@ -406,9 +500,7 @@ fn server_endpoint(bind: SocketAddr) -> io::Result<Endpoint> {
     Ok(endpoint)
 }
 
-fn client_endpoint(bind: SocketAddr) -> io::Result<Endpoint> {
-    let mut endpoint = Endpoint::client(bind)?;
-
+fn client_config() -> io::Result<ClientConfig> {
     let crypto = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(AcceptAnyServer))
@@ -418,7 +510,12 @@ fn client_endpoint(bind: SocketAddr) -> io::Result<Endpoint> {
         quinn::crypto::rustls::QuicClientConfig::try_from(crypto).map_err(other)?,
     ));
     client_config.transport_config(transport_config());
-    endpoint.set_default_client_config(client_config);
+    Ok(client_config)
+}
+
+fn client_endpoint(bind: SocketAddr) -> io::Result<Endpoint> {
+    let mut endpoint = Endpoint::client(bind)?;
+    endpoint.set_default_client_config(client_config()?);
     Ok(endpoint)
 }
 
@@ -580,5 +677,33 @@ mod tests {
             assert!(Instant::now() < deadline, "controle nunca chegou");
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    /// Furo de NAT pelo caminho novo: o viewer conecta, o host aceita, e os dois
+    /// trocam dados pela conexão **direta** (sem relay). No loopback não há NAT,
+    /// mas o percurso — endpoint compartilhado, `conectar` + `aceitar_furando` —
+    /// é o mesmo que vai rodar entre as duas máquinas.
+    #[test]
+    fn furo_de_nat_em_loopback() {
+        let host = QuicEndpoint::abrir_servidor().unwrap();
+        let viewer = QuicEndpoint::abrir_cliente().unwrap();
+        let porta_host = host.local_addr().unwrap().port();
+        let porta_viewer = viewer.local_addr().unwrap().port();
+        let host_addr: SocketAddr = format!("127.0.0.1:{porta_host}").parse().unwrap();
+        let viewer_addr: SocketAddr = format!("127.0.0.1:{porta_viewer}").parse().unwrap();
+
+        let aceitando = std::thread::spawn(move || {
+            host.aceitar_furando(viewer_addr, Duration::from_secs(8))
+                .expect("host devia aceitar")
+        });
+        let mut cliente = viewer
+            .conectar(host_addr, Duration::from_secs(8))
+            .expect("viewer devia conectar");
+        let mut servidor = aceitando.join().unwrap();
+
+        cliente.send(Channel::Control, b"oi").unwrap();
+        assert_eq!(wait(&mut servidor).1, b"oi".to_vec());
+        servidor.send(Channel::Control, b"ok").unwrap();
+        assert_eq!(wait(&mut cliente).1, b"ok".to_vec());
     }
 }

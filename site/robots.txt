@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+# o instalador tem 7 MB; não há por que um robô baixá-lo repetidamente
+Disallow: /baixar/
+
+Sitemap: https://www.pcshare.com.br/sitemap.xml

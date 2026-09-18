@@ -15,3 +15,7 @@
 
 # Permissões locais do Claude Code, não do produto
 /.claude
+
+# O .exe que a landing oferece para baixar: 7 MB montados na hora do deploy,
+# copiados de target/release por site/publicar.sh. Binário não entra no git.
+/site/baixar

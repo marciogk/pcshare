@@ -11,7 +11,7 @@ pub mod tcp;
 pub mod transport;
 
 pub use proto::{InputEvent, Message, MouseButton, ProtoError};
-pub use quic::QuicTransport;
+pub use quic::{QuicEndpoint, QuicTransport};
 pub use secure::{Identity, SecureTransport, fingerprint_of};
 pub use tcp::TcpTransport;
 pub use transport::{Channel, Transport};

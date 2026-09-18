@@ -1,5 +1,31 @@
-<title>PCShare</title>
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PCShare — acesso remoto por ID</title>
 <meta name="description" content="Acesso remoto por ID. O operador assina; quem é acessado usa de graça.">
+<link rel="canonical" href="https://www.pcshare.com.br/">
+<meta name="theme-color" content="#0A1E3D">
+<link rel="icon" type="image/png" sizes="64x64" href="/favicon.png">
+<link rel="apple-touch-icon" href="/favicon.png">
+
+<!-- cartão do link: é assim que a página aparece colada no WhatsApp -->
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="PCShare">
+<meta property="og:locale" content="pt_BR">
+<meta property="og:url" content="https://www.pcshare.com.br/">
+<meta property="og:title" content="PCShare — acesse qualquer PC pelo número">
+<meta property="og:description" content="Diga o ID de nove dígitos e conecte: sem abrir portas no roteador, sem VPN, cifrado de ponta a ponta. Quem é acessado usa de graça.">
+<meta property="og:image" content="https://www.pcshare.com.br/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="PCShare — Comunicação & Acesso Remoto">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="PCShare — acesse qualquer PC pelo número">
+<meta name="twitter:description" content="Diga o ID de nove dígitos e conecte: sem abrir portas no roteador, sem VPN, cifrado de ponta a ponta.">
+<meta name="twitter:image" content="https://www.pcshare.com.br/og.png">
+
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&family=IBM+Plex+Mono:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
@@ -184,6 +210,8 @@
     .nav-cta .btn:first-child{display:none}
   }
 </style>
+</head>
+<body>
 
 <div class="top">
   <div class="wrap">
@@ -196,8 +224,7 @@
         <a href="#preco">Preço</a>
       </div>
       <div class="nav-cta">
-        <!-- TROQUE por o link real de download do Agente -->
-        <a class="btn btn-ghost-light" href="#baixar">Baixar grátis</a>
+        <a class="btn btn-ghost-light" href="/baixar/PCShare-Agente.exe" download>Baixar grátis</a>
         <a class="btn btn-primary" href="#preco">Assinar</a>
       </div>
     </nav>
@@ -209,7 +236,7 @@
         <p class="lead">Diga o ID de nove dígitos e conecte — sem abrir portas no roteador, sem VPN, com a imagem nítida e tudo cifrado de ponta a ponta.</p>
         <div class="hero-cta">
           <a class="btn btn-primary btn-lg" href="#preco">Assinar o PCShare</a>
-          <a class="btn btn-ghost-light btn-lg" href="#baixar">Baixar o Agente grátis</a>
+          <a class="btn btn-ghost-light btn-lg" href="/baixar/PCShare-Agente.exe" download>Baixar o Agente grátis</a>
         </div>
         <div class="trust">
           <span><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l7 4v6c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-4z"/></svg> Cifrado ponta a ponta</span>
@@ -278,8 +305,8 @@
         </ul>
         <div class="foot">
           <div class="price">R$ 0 <small>/ grátis</small></div>
-          <!-- TROQUE href por o link real do instalador do Agente -->
-          <a class="btn btn-ghost" href="#baixar" id="baixar">Baixar o Agente</a>
+          <a class="btn btn-ghost" href="/baixar/PCShare-Agente.exe" download id="baixar">Baixar o Agente</a>
+          <p class="note">Programa único, sem instalador — baixe e abra. Na primeira vez o Windows avisa que o editor é desconhecido: clique em <b>Mais informações → Executar assim mesmo</b>.</p>
         </div>
       </div>
     </div>
@@ -377,8 +404,9 @@
           <li><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg> Máquinas recentes com apelidos</li>
           <li><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg> Cancele quando quiser</li>
         </ul>
-        <!-- TROQUE href pelo link do seu checkout (Mercado Pago / Stripe / etc.) -->
-        <a class="btn btn-primary btn-lg" href="#assinar">Assinar e receber a chave</a>
+        <!-- PENDENTE: trocar pelo link de pagamento do Asaas antes de publicar.
+             Enquanto for âncora morta, o site não deve ir ao ar. -->
+        <a class="btn btn-primary btn-lg" href="#assinar" id="assinar">Assinar e receber a chave</a>
         <p class="sub">Você recebe a chave por e-mail e ativa no aplicativo.</p>
       </div>
     </div>
@@ -436,3 +464,6 @@
     <div class="tagline">© 2026 PCShare</div>
   </div>
 </footer>
+
+</body>
+</html>
