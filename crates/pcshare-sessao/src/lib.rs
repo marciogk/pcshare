@@ -981,21 +981,41 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
 
     // Encoder primeiro em tamanho nativo, só para saber se o caminho é GPU
     // direto — é nele que o processador de vídeo reduz a imagem por hardware.
+    //
+    // Se o encoder por GPU falhar, **cai para software** em vez de derrubar a
+    // sessão. O encoder de hardware tem número limitado de sessões e pode estar
+    // ocupado por outro app (AnyDesk), ou o driver simplesmente não suporta o
+    // caminho por textura — observado com `0x80004005` numa máquina real, onde
+    // a captura abria mas o `with_gpu` falhava. Software é mais lento, mas
+    // funciona onde o hardware não vai.
     let mut enc = if force_cpu {
         H264Encoder::new(nw, nh, fps(), bitrate())?
     } else {
-        H264Encoder::with_gpu(&gpu, nw, nh, fps(), bitrate())?
+        match H264Encoder::with_gpu(&gpu, nw, nh, fps(), bitrate()) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("host: encoder por GPU indisponível ({e}); caindo para software");
+                H264Encoder::new(nw, nh, fps(), bitrate())?
+            }
+        }
     };
     let gpu_direct = enc.is_gpu_direct();
 
     // Só reduz no caminho GPU. No caminho por CPU, mantém o nativo.
-    let (ow, oh) = match pedido {
+    let (mut ow, mut oh) = match pedido {
         Some((rw, rh)) if gpu_direct => resolucao_alvo(nw, nh, rw, rh),
         _ => (nw, nh),
     };
     if (ow, oh) != (nw, nh) {
         println!("host: reduzindo {nw}x{nh} -> {ow}x{oh} para o monitor do viewer");
-        enc = H264Encoder::with_gpu(&gpu, ow, oh, fps(), bitrate())?;
+        match H264Encoder::with_gpu(&gpu, ow, oh, fps(), bitrate()) {
+            Ok(e) => enc = e,
+            Err(e) => {
+                eprintln!("host: encoder reduzido falhou ({e}); mantendo {nw}x{nh}");
+                ow = nw;
+                oh = nh;
+            }
+        }
     }
     println!("host: encoder [{}] ({})", enc.name(), enc.tuning().join(", "));
 

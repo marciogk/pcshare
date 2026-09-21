@@ -13,8 +13,11 @@
 # Sobre o servidor: o VPS é gerenciado pelo painel iContainer e o **nginx roda
 # em container** (`ic-nginx-hyFE`, rede host). Por isso o recarregamento é um
 # `docker exec`, não um `systemctl` — não existe nginx de distro na máquina.
-# O server block fica em conf.d/20-pcshare.conf, escrito à mão: o painel não
-# reescreve arquivo que não foi ele quem gerou.
+# Os server blocks ficam em conf.d/zz-pcshare.conf, escritos à mão: o painel não
+# reescreve arquivo que não foi ele quem gerou. O "zz-" é de propósito (o
+# cabeçalho do arquivo explica): mantém o bloco 443 do painel como padrão.
+# O certificado se renova sozinho (certbot no host + gancho que copia para o
+# container); este script não mexe nele.
 #
 # Dá para sobrescrever qualquer coisa por variável de ambiente:
 #     VPS_USER=outro ./site/publicar.sh
