@@ -1,0 +1,487 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Como usar o PCShare — guia passo a passo</title>
+<meta name="description" content="Passo a passo do PCShare: como permitir acesso com o Agente grátis e como acessar outro PC com o app do operador.">
+<link rel="canonical" href="https://www.pcshare.com.br/como-usar.html">
+<meta name="theme-color" content="#0A1E3D">
+<link rel="icon" type="image/png" sizes="64x64" href="/favicon.png">
+<link rel="apple-touch-icon" href="/favicon.png">
+
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="PCShare">
+<meta property="og:locale" content="pt_BR">
+<meta property="og:url" content="https://www.pcshare.com.br/como-usar.html">
+<meta property="og:title" content="Como usar o PCShare — guia passo a passo">
+<meta property="og:description" content="Do download à tela remota: o passo a passo para quem é acessado (Agente grátis) e para quem acessa (operador).">
+<meta property="og:image" content="https://www.pcshare.com.br/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Como usar o PCShare">
+<meta name="twitter:description" content="Do download à tela remota, para os dois lados. Passo a passo.">
+<meta name="twitter:image" content="https://www.pcshare.com.br/og.png">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&family=IBM+Plex+Mono:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+  :root{
+    --navy:#0A1E3D; --navy-2:#0E2A54;
+    --navy-line:#1B3A66; --navy-card:#102E5B;
+    --cyan:#37B0EA; --cyan-soft:#8FD3F4;
+    --blue:#2E6FD6; --blue-hover:#255FBD;
+    --ink:#10203A; --muted:#5A7291; --muted-2:#7C90AB;
+    --paper:#F3F7FC; --card:#FFFFFF; --line:#DBE6F3; --line-2:#E9F0F8;
+    --good:#1FA463; --good-soft:#E3F5EC;
+    --warn:#C89B3C; --warn-bg:#FFF7E8; --warn-line:#F0DEB0;
+    --sans:"IBM Plex Sans", system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    --disp:"Bricolage Grotesque", var(--sans);
+    --mono:"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    --wrap:1120px;
+    --shadow:0 22px 50px -24px rgba(9,26,54,.45);
+    --shadow-sm:0 6px 20px -12px rgba(9,26,54,.35);
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--paper); color:var(--ink);
+    font-family:var(--sans); font-size:16px; line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+  }
+  h1,h2,h3{font-family:var(--disp); font-weight:700; line-height:1.08; letter-spacing:-.02em; text-wrap:balance; margin:0}
+  p{margin:0}
+  a{color:inherit; text-decoration:none}
+  img{max-width:100%; display:block}
+  .wrap{max-width:var(--wrap); margin-inline:auto; padding-inline:24px}
+  .eyebrow{font-size:.78rem; font-weight:600; letter-spacing:.14em; text-transform:uppercase}
+  .btn{
+    display:inline-flex; align-items:center; gap:.5rem; justify-content:center;
+    font-family:var(--sans); font-weight:600; font-size:.98rem;
+    padding:.72rem 1.15rem; border-radius:11px; border:1px solid transparent;
+    cursor:pointer; transition:transform .12s ease, background .15s ease, border-color .15s ease;
+  }
+  .btn:active{transform:translateY(1px)}
+  .btn-primary{background:var(--blue); color:#fff}
+  .btn-primary:hover{background:var(--blue-hover)}
+  .btn-ghost-light{background:transparent; color:#EAF4FD; border-color:rgba(143,211,244,.35)}
+  .btn-ghost-light:hover{border-color:var(--cyan); color:#fff}
+  .btn-ghost{background:transparent; color:var(--blue); border-color:var(--line)}
+  .btn-ghost:hover{border-color:var(--blue); background:#fff}
+  .btn-lg{padding:.85rem 1.4rem; font-size:1.02rem; border-radius:12px}
+  a:focus-visible,.btn:focus-visible{outline:3px solid var(--cyan); outline-offset:2px}
+
+  /* ---------- top (navy) ---------- */
+  .top{background:var(--navy); color:#EAF2FB; position:relative; overflow:hidden}
+  .top::before{
+    content:""; position:absolute; inset:0;
+    background:
+      radial-gradient(120% 90% at 82% -10%, rgba(55,176,234,.20), transparent 55%),
+      radial-gradient(90% 70% at 0% 110%, rgba(46,111,214,.18), transparent 60%);
+    pointer-events:none;
+  }
+  nav{position:relative; display:flex; align-items:center; justify-content:space-between; gap:1rem; padding-block:22px}
+  .brand{display:flex; align-items:center; gap:.6rem; font-family:var(--disp); font-weight:800; font-size:1.28rem; letter-spacing:-.01em; color:#fff}
+  .brand .mk{width:12px; height:12px; border-radius:4px; background:var(--cyan); box-shadow:0 0 0 4px rgba(55,176,234,.18)}
+  .nav-links{display:flex; align-items:center; gap:1.6rem}
+  .nav-links a{color:#B9CBE4; font-weight:500; font-size:.95rem}
+  .nav-links a:hover,.nav-links a[aria-current]{color:#fff}
+  .nav-cta{display:flex; align-items:center; gap:.6rem}
+
+  .phead{position:relative; padding-block:44px 64px; max-width:70ch}
+  .phead .eyebrow{color:var(--cyan-soft)}
+  .phead h1{color:#fff; font-size:clamp(2.1rem,4.6vw,3.3rem); margin-top:14px}
+  .phead h1 .hl{color:var(--cyan)}
+  .phead .lead{color:#B9CBE4; font-size:1.14rem; max-width:52ch; margin-top:16px}
+
+  /* role picker */
+  .roles{display:grid; grid-template-columns:1fr 1fr; gap:18px; margin-top:30px; max-width:820px}
+  .role{display:flex; flex-direction:column; gap:6px; padding:22px; border-radius:16px; border:1px solid var(--navy-line);
+        background:linear-gradient(180deg,rgba(28,59,102,.45),rgba(16,46,91,.30)); transition:border-color .15s ease, transform .12s ease}
+  .role:hover{border-color:var(--cyan); transform:translateY(-2px)}
+  .role .tag{align-self:flex-start; font-size:.72rem; font-weight:700; letter-spacing:.04em; padding:.24rem .55rem; border-radius:999px; margin-bottom:4px}
+  .tag.free{background:rgba(31,164,99,.16); color:#7FE0AC}
+  .tag.paid{background:rgba(46,111,214,.20); color:#9FC2F4}
+  .role h2{color:#fff; font-size:1.28rem}
+  .role p{color:#A9BEDA; font-size:.95rem}
+  .role .arrow{margin-top:8px; color:var(--cyan); font-weight:600; font-size:.92rem; display:inline-flex; align-items:center; gap:.35rem}
+
+  /* ---------- sections ---------- */
+  section{padding-block:74px}
+  .sec-head{max-width:62ch}
+  .sec-head .eyebrow{color:var(--blue)}
+  .sec-head .eyebrow.free{color:var(--good)}
+  .sec-head h2{font-size:clamp(1.7rem,3.3vw,2.4rem); margin-top:12px}
+  .sec-head p{color:var(--muted); font-size:1.08rem; margin-top:14px; max-width:56ch}
+  .alt{background:#fff; border-block:1px solid var(--line)}
+
+  /* guide layout: steps + a sticky visual */
+  .guide{display:grid; grid-template-columns:1.15fr .85fr; gap:48px; align-items:start; margin-top:36px}
+  .visual{position:sticky; top:24px}
+
+  /* numbered steps */
+  .gsteps{list-style:none; counter-reset:g; margin:0; padding:0; display:flex; flex-direction:column; gap:2px}
+  .gstep{position:relative; display:grid; grid-template-columns:auto 1fr; gap:18px; padding:8px 0 26px}
+  .gstep::before{
+    counter-increment:g; content:counter(g);
+    grid-row:1 / span 2; width:38px; height:38px; border-radius:50%;
+    display:grid; place-items:center; font-family:var(--disp); font-weight:700; font-size:1.05rem;
+    color:#fff; background:var(--blue); z-index:1;
+  }
+  .gsteps.free .gstep::before{background:var(--good)}
+  /* connecting line between numbers */
+  .gstep:not(:last-child)::after{
+    content:""; position:absolute; left:18px; top:38px; bottom:0; width:2px; background:var(--line);
+  }
+  .gstep h3{font-size:1.16rem}
+  .gstep .txt{color:var(--muted); margin-top:6px; font-size:.98rem}
+  .gstep .txt strong{color:var(--ink)}
+  .gstep .btn{margin-top:14px}
+  kbd{font-family:var(--mono); font-size:.82em; background:#EEF3FA; border:1px solid var(--line); border-bottom-width:2px; border-radius:6px; padding:.08em .4em; color:var(--ink)}
+  .path-inline{font-family:var(--mono); font-size:.86em; color:var(--blue); background:#EAF1FD; padding:.08em .4em; border-radius:6px}
+
+  /* callouts */
+  .callout{display:flex; gap:.7rem; padding:12px 15px; border-radius:12px; font-size:.93rem; margin-top:14px; line-height:1.5}
+  .callout svg{flex:none; margin-top:2px}
+  .callout.warn{background:var(--warn-bg); border:1px solid var(--warn-line); color:#6b5626}
+  .callout.warn svg{color:var(--warn)}
+  .callout.info{background:#EAF1FD; border:1px solid #C9DBF3; color:#2b4a78}
+  .callout.info svg{color:var(--blue)}
+  .callout b{color:inherit}
+
+  /* app-window mock (from the landing) */
+  .mock{background:var(--card); color:var(--ink); border-radius:16px; box-shadow:var(--shadow); overflow:hidden; border:1px solid var(--line)}
+  .mock + .mock{margin-top:20px}
+  .mock-bar{display:flex; align-items:center; gap:.5rem; padding:11px 14px; border-bottom:1px solid var(--line-2); background:#FBFDFF}
+  .mock-bar i{width:11px; height:11px; border-radius:50%; background:#D6E0EC; display:block}
+  .mock-bar i:nth-child(1){background:#F0A9A0} .mock-bar i:nth-child(2){background:#F4CE93} .mock-bar i:nth-child(3){background:#A9D8B0}
+  .mock-bar .ttl{margin-left:8px; font-size:.8rem; color:var(--muted); font-weight:500}
+  .mock-body{padding:20px}
+  .mock-cap{font-family:var(--disp); font-weight:700; font-size:1.05rem; margin-bottom:14px}
+  .mock-cap small{display:block; font-family:var(--sans); font-weight:500; font-size:.82rem; color:var(--muted); letter-spacing:0; text-transform:none; margin-top:2px}
+  .panel{border:1px solid var(--line); border-radius:12px; padding:14px 15px; background:#FCFEFF}
+  .panel + .panel{margin-top:12px}
+  .plabel{font-size:.7rem; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:var(--muted-2)}
+  .idrow{display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:6px}
+  .idnum{font-family:var(--mono); font-weight:600; font-size:1.5rem; letter-spacing:.02em; color:var(--ink)}
+  .pill{display:inline-flex; align-items:center; gap:.35rem; font-size:.74rem; color:var(--good); font-weight:600}
+  .pill .d{width:8px; height:8px; border-radius:50%; background:var(--good)}
+  .field{display:flex; align-items:center; gap:8px; margin-top:9px}
+  .field .inp{flex:1; border:1px solid var(--line); border-radius:9px; padding:.5rem .65rem; font-family:var(--mono); color:var(--muted); font-size:.92rem; background:#fff}
+  .field .go{background:var(--blue); color:#fff; border:none; border-radius:9px; padding:.55rem .9rem; font-weight:600; font-family:var(--sans); font-size:.88rem; white-space:nowrap}
+  .mockbtn{margin-top:14px; width:100%; background:var(--blue); color:#fff; border:none; border-radius:10px; padding:.72rem; font-weight:600; font-family:var(--sans); font-size:.95rem}
+  .mockbtn.free{background:var(--good)}
+
+  /* session toolbar mock */
+  .toolbar{display:flex; gap:8px; padding:12px 14px; border-bottom:1px solid var(--line-2); background:#FBFDFF; flex-wrap:wrap}
+  .tbtn{display:inline-flex; align-items:center; gap:.35rem; font-size:.82rem; font-weight:500; color:var(--ink); border:1px solid var(--line); border-radius:8px; padding:.38rem .6rem; background:#fff}
+  .screen{height:150px; background:
+      linear-gradient(180deg,#5B7FB4,#22406E);
+      display:grid; place-items:center; color:#D9E6F7; font-size:.82rem; position:relative}
+  .screen::after{content:"tela da máquina acessada"; opacity:.85}
+
+  /* tips (navy) */
+  .tips{background:var(--navy); color:#E7F0FA; border-block:1px solid var(--navy-2)}
+  .tips .sec-head .eyebrow{color:var(--cyan)}
+  .tips .sec-head h2{color:#fff}
+  .tgrid{display:grid; grid-template-columns:repeat(3,1fr); gap:18px; margin-top:36px}
+  .tip{border:1px solid var(--navy-card); border-radius:14px; padding:22px; background:linear-gradient(180deg,rgba(28,59,102,.35),rgba(16,46,91,.25))}
+  .tip .ic{width:40px; height:40px; border-radius:11px; display:grid; place-items:center; background:rgba(55,176,234,.14); color:var(--cyan); margin-bottom:14px}
+  .tip h3{font-size:1.05rem; color:#fff}
+  .tip p{color:#A9BEDA; margin-top:7px; font-size:.93rem}
+
+  /* troubleshooting */
+  .faq-grid{display:grid; grid-template-columns:1fr 1fr; gap:16px 40px; margin-top:32px}
+  .qa h3{font-size:1.05rem; display:flex; gap:.5rem; align-items:flex-start}
+  .qa h3 svg{flex:none; margin-top:3px; color:var(--blue)}
+  .qa p{color:var(--muted); margin-top:6px; font-size:.97rem}
+
+  footer{background:var(--navy); color:#9FB4D2; padding-block:40px}
+  .foot-row{display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:16px}
+  footer .brand{font-size:1.1rem}
+  footer .tagline{font-size:.86rem; color:#7E96BA}
+  footer .links{display:flex; gap:1.3rem; font-size:.9rem}
+  footer .links a:hover{color:#fff}
+
+  @media (max-width:900px){
+    .roles,.guide,.tgrid,.faq-grid{grid-template-columns:1fr}
+    .guide{gap:32px}
+    .visual{position:static}
+    .nav-links{display:none}
+  }
+  @media (max-width:560px){
+    .wrap{padding-inline:18px}
+    section{padding-block:52px}
+    .idnum{font-size:1.3rem}
+    .nav-cta .btn:first-child{display:none}
+  }
+</style>
+</head>
+<body>
+
+<div class="top">
+  <div class="wrap">
+    <nav>
+      <a class="brand" href="/"><span class="mk"></span>PCShare</a>
+      <div class="nav-links">
+        <a href="/#modelo">Como cobra</a>
+        <a href="/#recursos">Recursos</a>
+        <a href="/#preco">Preço</a>
+        <a href="/como-usar.html" aria-current="page">Como usar</a>
+      </div>
+      <div class="nav-cta">
+        <a class="btn btn-ghost-light" href="/baixar/PCShare-Agente.exe" download>Baixar grátis</a>
+        <a class="btn btn-primary" href="/#preco">Assinar</a>
+      </div>
+    </nav>
+
+    <header class="phead">
+      <span class="eyebrow">Guia rápido</span>
+      <h1>Como usar o <span class="hl">PCShare.</span></h1>
+      <p class="lead">São dois programas, um para cada papel. Ache o seu abaixo e siga o passo a passo — do download à tela remota em cerca de um minuto.</p>
+
+      <div class="roles">
+        <a class="role" href="#agente">
+          <span class="tag free">Grátis</span>
+          <h2>Vou ser acessado</h2>
+          <p>Alguém vai te ajudar mexendo no seu PC. Você usa o Agente, de graça.</p>
+          <span class="arrow">Ver o passo a passo
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span>
+        </a>
+        <a class="role" href="#operador">
+          <span class="tag paid">Assinatura</span>
+          <h2>Vou acessar outro PC</h2>
+          <p>Você controla a máquina de outra pessoa. Usa o PCShare, com sua chave.</p>
+          <span class="arrow">Ver o passo a passo
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span>
+        </a>
+      </div>
+    </header>
+  </div>
+</div>
+
+<!-- ============ AGENTE (quem é acessado) ============ -->
+<section id="agente">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow free">Grátis · quem é acessado</span>
+      <h2>Deixar acessarem o meu PC</h2>
+      <p>Você baixa o Agente, mostra dois números para quem vai te ajudar e pronto — nada de configurar rede, sem cadastro, sem pagar nada.</p>
+    </div>
+
+    <div class="guide">
+      <ol class="gsteps free">
+        <li class="gstep">
+          <h3>Baixe o Agente</h3>
+          <p class="txt">É um programa único, sem instalador. Baixe e guarde onde quiser — a Área de Trabalho serve.</p>
+          <a class="btn btn-ghost" href="/baixar/PCShare-Agente.exe" download>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12M12 15l-4-4M12 15l4-4M5 21h14"/></svg>
+            Baixar o Agente grátis
+          </a>
+        </li>
+        <li class="gstep">
+          <h3>Abra o programa</h3>
+          <p class="txt">Dê dois cliques no arquivo baixado. A janela <strong>PCShare Agente</strong> abre mostrando o número da sua máquina.</p>
+          <div class="callout warn">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+            <span>Na primeira vez o Windows pode avisar <b>"Windows protegeu o seu PC"</b>. Clique em <b>Mais informações → Executar assim mesmo</b>. É normal — o programa ainda não tem assinatura digital.</span>
+          </div>
+        </li>
+        <li class="gstep">
+          <h3>Clique em "Compartilhar minha tela"</h3>
+          <p class="txt">O botão azul coloca sua máquina à espera. Só a partir daí ela pode ser acessada — enquanto você não clica, ninguém entra.</p>
+        </li>
+        <li class="gstep">
+          <h3>Passe o ID e a senha</h3>
+          <p class="txt">Diga a quem vai te ajudar o <strong>ID</strong> (nove dígitos) e a <strong>Senha</strong> que aparecem na janela. É o que a outra pessoa digita para conectar.</p>
+          <div class="callout info">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/></svg>
+            <span>A senha muda a cada vez que você abre o Agente. Passe sempre a que estiver na tela naquele momento.</span>
+          </div>
+        </li>
+        <li class="gstep">
+          <h3>Deixe a janela aberta</h3>
+          <p class="txt">Mantenha o Agente aberto durante o atendimento. Quando terminar, é só <strong>fechar a janela</strong> — o acesso encerra na hora.</p>
+        </li>
+      </ol>
+
+      <div class="visual">
+        <div class="mock" role="img" aria-label="Janela do PCShare Agente com o ID, a senha e o botão Compartilhar minha tela">
+          <div class="mock-bar"><i></i><i></i><i></i><span class="ttl">PCShare Agente</span></div>
+          <div class="mock-body">
+            <div class="mock-cap">PCShare Agente
+              <small>Permitir acesso à minha máquina</small>
+            </div>
+            <div class="panel">
+              <div class="plabel">Esta máquina</div>
+              <div class="idrow">
+                <span class="idnum">226 796 386</span>
+                <span class="pill"><span class="d"></span>pronto</span>
+              </div>
+              <div class="field">
+                <span class="inp" style="flex:none">Senha:</span>
+                <span class="inp" style="max-width:120px">7QK2·P8M4</span>
+              </div>
+            </div>
+            <button class="mockbtn free" type="button">Compartilhar minha tela</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ OPERADOR (quem acessa) ============ -->
+<section id="operador" class="alt">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Assinatura · quem acessa</span>
+      <h2>Acessar o PC de outra pessoa</h2>
+      <p>Com o PCShare instalado e a sua chave ativada, é só digitar o ID e a senha que a outra pessoa te passar — e você vê a tela dela como se estivesse na frente.</p>
+    </div>
+
+    <div class="guide">
+      <ol class="gsteps">
+        <li class="gstep">
+          <h3>Assine e receba a chave</h3>
+          <p class="txt">A assinatura é por operador (quem acessa). Ao assinar, sua <strong>chave de licença</strong> chega por e-mail.</p>
+          <a class="btn btn-primary" href="/#preco">Ver o plano</a>
+        </li>
+        <li class="gstep">
+          <h3>Instale o PCShare e ative a chave</h3>
+          <p class="txt">Abra o PCShare, vá em <strong>Configurações</strong> e cole a chave que recebeu. É o que libera o acesso.</p>
+        </li>
+        <li class="gstep">
+          <h3>Peça o ID e a senha</h3>
+          <p class="txt">A outra pessoa abre o <strong>Agente</strong> e lê para você o ID de nove dígitos e a senha da sessão.</p>
+        </li>
+        <li class="gstep">
+          <h3>Digite e conecte</h3>
+          <p class="txt">No PCShare, preencha o <strong>ID</strong> e a <strong>senha</strong> e clique em <strong>Conectar</strong>. A conexão atravessa o NAT sozinha, sem abrir portas.</p>
+        </li>
+        <li class="gstep">
+          <h3>Controle a tela</h3>
+          <p class="txt">A tela remota abre em uma janela própria. Use o mouse e o teclado normalmente. <strong>Maximize a janela</strong> para a imagem ficar mais nítida.</p>
+        </li>
+        <li class="gstep">
+          <h3>Use a barra da sessão</h3>
+          <p class="txt">No topo da janela há três botões: <strong>Enviar arquivo</strong> e <strong>Baixar arquivo</strong> (nos dois sentidos) e <kbd>Ctrl+Alt+Del</kbd> para passar por telas de login e prompts do sistema.</p>
+        </li>
+      </ol>
+
+      <div class="visual">
+        <div class="mock" role="img" aria-label="Janela do PCShare para conectar por ID">
+          <div class="mock-bar"><i></i><i></i><i></i><span class="ttl">PCShare</span></div>
+          <div class="mock-body">
+            <div class="panel">
+              <div class="plabel">Conectar a outra máquina</div>
+              <div class="field">
+                <span class="inp">ID · 226 796 386</span>
+              </div>
+              <div class="field">
+                <span class="inp">Senha · ••••••••</span>
+                <button class="go" type="button">Conectar</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="mock" role="img" aria-label="Barra da sessão com Enviar arquivo, Baixar arquivo e Ctrl+Alt+Del sobre a tela remota">
+          <div class="toolbar">
+            <span class="tbtn">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20V6M12 6l-5 5M12 6l5 5"/></svg>
+              Enviar arquivo</span>
+            <span class="tbtn">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v14M12 18l-5-5M12 18l5-5"/></svg>
+              Baixar arquivo</span>
+            <span class="tbtn">Ctrl+Alt+Del</span>
+          </div>
+          <div class="screen"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ dicas ============ -->
+<section class="tips">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Boas práticas</span>
+      <h2>Para uma sessão redonda.</h2>
+    </div>
+    <div class="tgrid">
+      <div class="tip">
+        <div class="ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></div>
+        <h3>Maximize a janela</h3>
+        <p>Do lado de quem acessa, a tela remota fica mais nítida com a janela maximizada — perto de 1:1 com o seu monitor.</p>
+      </div>
+      <div class="tip">
+        <div class="ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="13" rx="2"/><path d="M8 21h8"/></svg></div>
+        <h3>Uma conexão de tela por vez</h3>
+        <p>Não deixe outro programa de acesso remoto ativo ao mesmo tempo na mesma máquina — duas ligações de tela se atrapalham.</p>
+      </div>
+      <div class="tip">
+        <div class="ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 018 0v3"/></svg></div>
+        <h3>Cada sessão é cifrada</h3>
+        <p>A conexão é fechada de ponta a ponta entre as duas máquinas. Nem o servidor que apresenta os dois lados enxerga a sua tela.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ problemas comuns ============ -->
+<section id="ajuda">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Deu algo errado?</span>
+      <h2>Problemas comuns.</h2>
+    </div>
+    <div class="faq-grid">
+      <div class="qa">
+        <h3><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l7 4v6c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-4z"/></svg> "O Windows protegeu o seu PC"</h3>
+        <p>É o aviso de editor desconhecido, esperado por enquanto. Clique em <b>Mais informações → Executar assim mesmo</b>.</p>
+      </div>
+      <div class="qa">
+        <h3><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg> "Máquina não encontrada"</h3>
+        <p>Confira o ID (os nove dígitos, sem espaços) e peça para a outra pessoa checar se clicou em <b>Compartilhar minha tela</b> e se a janela do Agente segue aberta.</p>
+      </div>
+      <div class="qa">
+        <h3><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16v11H4z"/><path d="M2 20h20"/></svg> A imagem está borrada</h3>
+        <p>Maximize a janela da sessão. A nitidez também depende da placa de vídeo da máquina acessada — em máquinas mais antigas a imagem pode ficar um pouco mais mole.</p>
+      </div>
+      <div class="qa">
+        <h3><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg> "Faltou uma DLL" ao abrir</h3>
+        <p>Se aparecer algo como <span class="path-inline">VCRUNTIME140.dll</span>, instale o <b>Microsoft Visual C++ Redistributable (x64)</b> da Microsoft e abra de novo.</p>
+      </div>
+      <div class="qa">
+        <h3><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg> A senha não confere</h3>
+        <p>A senha do Agente é gerada de novo a cada abertura. Peça a pessoa para ler a que está na tela naquele instante e digite exatamente igual.</p>
+      </div>
+      <div class="qa">
+        <h3><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8"/></svg> Funciona em qual sistema?</h3>
+        <p>Windows, por enquanto — os dois lados. O Agente é grátis; quem acessa usa o PCShare com a chave de assinatura.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap foot-row">
+    <div>
+      <a class="brand" href="/"><span class="mk"></span>PCShare</a>
+      <div class="tagline">Comunicação &amp; Acesso Remoto</div>
+    </div>
+    <div class="links">
+      <a href="/#modelo">Como cobra</a>
+      <a href="/#recursos">Recursos</a>
+      <a href="/#preco">Preço</a>
+      <a href="/como-usar.html">Como usar</a>
+    </div>
+    <div class="tagline">© 2026 PCShare</div>
+  </div>
+</footer>
+
+</body>
+</html>
