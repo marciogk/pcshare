@@ -138,8 +138,78 @@ impl H264Encoder {
         gpu: Option<&Arc<GpuContext>>,
     ) -> Result<Self> {
         unsafe {
-            let (transform, name) = find_encoder(backend)?;
+            // Enumera TODOS os encoders candidatos e tenta configurar um a um,
+            // parando no primeiro que der certo. O motivo é concreto: num PC com
+            // duas GPUs (Intel integrada + NVIDIA), o sistema oferece um MFT de
+            // cada fabricante. O primeiro da lista pode ser de um fabricante
+            // enquanto o nosso dispositivo D3D é do outro (o que aciona a tela),
+            // e o par não casa — E_FAIL na hora de amarrar o gerenciador D3D.
+            // Tentar só o primeiro fazia a máquina do usuário (Intel+NVIDIA)
+            // cair para software com 0x80004005, com o NVENC ali do lado, só
+            // precisando ser o candidato escolhido.
+            let candidatos = find_activates(
+                MFT_CATEGORY_VIDEO_ENCODER,
+                MFVideoFormat_NV12,
+                MFVideoFormat_H264,
+                backend,
+            )?;
 
+            let mut ultimo_erro: Option<windows::core::Error> = None;
+            for activate in candidatos {
+                let nome = friendly_name(&activate);
+                // Uma linha por candidato, só no caminho de hardware: é o que
+                // revela, no console da máquina remota, quais encoders existem e
+                // qual falhou.
+                if gpu.is_some() {
+                    eprintln!("codec: encoder de hardware candidato: '{nome}'");
+                }
+                let transform = match activate.ActivateObject::<IMFTransform>() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        if gpu.is_some() {
+                            eprintln!("codec: '{nome}' não ativou ({e})");
+                        }
+                        ultimo_erro = Some(e);
+                        continue;
+                    }
+                };
+                match Self::configure_transform(
+                    transform, &nome, width, height, fps, bitrate, backend, gpu,
+                ) {
+                    Ok(enc) => return Ok(enc),
+                    Err(e) => {
+                        if gpu.is_some() {
+                            eprintln!("codec: '{nome}' não configurou ({e}); tentando o próximo");
+                        }
+                        let _ = activate.ShutdownObject();
+                        ultimo_erro = Some(e);
+                    }
+                }
+            }
+
+            Err(ultimo_erro.unwrap_or_else(|| {
+                windows::core::Error::new(
+                    MF_E_TOPO_CODEC_NOT_FOUND,
+                    "nenhum encoder configurou para este backend",
+                )
+            }))
+        }
+    }
+
+    /// Amarra um MFT já ativado à nossa GPU e tipos de mídia. Falha se o par
+    /// MFT↔dispositivo não casar (o caso de duas GPUs) — o chamador tenta então
+    /// o próximo candidato.
+    unsafe fn configure_transform(
+        transform: IMFTransform,
+        name: &str,
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate: u32,
+        backend: Backend,
+        gpu: Option<&Arc<GpuContext>>,
+    ) -> Result<Self> {
+        unsafe {
             let attrs = transform.GetAttributes()?;
             let is_async = attrs.GetUINT32(&MF_TRANSFORM_ASYNC).unwrap_or(0) == 1;
             if is_async {
@@ -198,7 +268,7 @@ impl H264Encoder {
             let events: Option<IMFMediaEventGenerator> =
                 if is_async { Some(transform.cast()?) } else { None };
 
-            let tuning = tune_rate_control(&transform, fps);
+            let tuning = tune_rate_control(&transform, fps, bitrate, backend);
 
             // Sem FLUSH aqui: o encoder de software o rejeita antes de o
             // streaming começar, e não há nada para descartar.
@@ -209,7 +279,7 @@ impl H264Encoder {
                 transform,
                 events,
                 backend,
-                name,
+                name: name.to_string(),
                 width,
                 height,
                 fps,
@@ -469,21 +539,68 @@ impl H264Encoder {
 ///
 /// Cada ajuste é aplicado em regime de melhor esforço: drivers antigos
 /// recusam alguns, e recusa não deve impedir o encoder de funcionar.
-unsafe fn tune_rate_control(transform: &IMFTransform, fps: u32) -> Vec<&'static str> {
+unsafe fn tune_rate_control(
+    transform: &IMFTransform,
+    fps: u32,
+    bitrate: u32,
+    backend: Backend,
+) -> Vec<&'static str> {
     unsafe {
         let Ok(codec) = transform.cast::<ICodecAPI>() else {
             return vec!["ICodecAPI indisponível"];
         };
         let mut applied = Vec::new();
 
-        // VBR irrestrito: gasta bits quando a cena muda, e praticamente nada
-        // quando ela está parada.
-        let mode = VARIANT::from(eAVEncCommonRateControlMode_UnconstrainedVBR.0 as u32);
-        if codec
-            .SetValue(&CODECAPI_AVEncCommonRateControlMode, &mode)
-            .is_ok()
-        {
-            applied.push("VBR");
+        // O controle de taxa é escolhido POR backend, de propósito:
+        //
+        // - **Hardware** (Quick Sync / NVENC / AMF): VBR irrestrito, o modo que
+        //   rendeu imagem "ótima" no teste real de 17/09/2026. É o caminho bom;
+        //   não se mexe no que funciona.
+        //
+        // - **Software** (encoder da Microsoft, o fallback quando não há
+        //   hardware): qualidade constante. O VBR do software raciona os bits
+        //   para uma média baixa e a imagem fica MOLE quando a cena muda —
+        //   medido em 22/09/2026 na máquina sem encoder de hardware, onde subir
+        //   o teto de bitrate não mudava nada. Quality mode aloca para manter a
+        //   qualidade quadro a quadro, que é o certo para tela. (Esse encoder
+        //   aceita o modo mas IGNORA o valor fino de qualidade — 60, 75 e 90
+        //   deram o mesmo bitstream; ainda assim aloca melhor que o VBR.)
+        let usar_quality = backend == Backend::Software && {
+            let mode = VARIANT::from(eAVEncCommonRateControlMode_Quality.0 as u32);
+            codec
+                .SetValue(&CODECAPI_AVEncCommonRateControlMode, &mode)
+                .is_ok()
+        };
+        if usar_quality {
+            applied.push("qualidade constante");
+            // 0..100. O encoder de software ignora o valor, mas o de hardware o
+            // respeita — deixado aqui para quando o quality mode valer também no
+            // hardware. `PCSHARE_QUALIDADE` sobrepõe.
+            let q = std::env::var("PCSHARE_QUALIDADE")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(75)
+                .min(100);
+            let qv = VARIANT::from(q);
+            if codec.SetValue(&CODECAPI_AVEncCommonQuality, &qv).is_ok() {
+                applied.push("nitidez alta");
+            }
+            // Teto de banda, melhor esforço: nem mirando qualidade deixa um
+            // scroll pesado estourar o upload do host. Encoder que ignora, a
+            // contrapressão cobre.
+            let maxbr = VARIANT::from(bitrate);
+            if codec.SetValue(&CODECAPI_AVEncCommonMaxBitRate, &maxbr).is_ok() {
+                applied.push("teto de banda");
+            }
+        } else {
+            // VBR irrestrito: gasta bits quando a cena muda, quase nada parada.
+            let mode = VARIANT::from(eAVEncCommonRateControlMode_UnconstrainedVBR.0 as u32);
+            if codec
+                .SetValue(&CODECAPI_AVEncCommonRateControlMode, &mode)
+                .is_ok()
+            {
+                applied.push("VBR");
+            }
         }
 
         // Keyframe periódico é desperdício em controle remoto. Numa tela
@@ -568,14 +685,57 @@ pub(crate) unsafe fn make_sample(nv12: &[u8], time: i64, duration: i64) -> Resul
     }
 }
 
-unsafe fn find_encoder(backend: Backend) -> Result<(IMFTransform, String)> {
+/// Enumera os MFTs candidatos (ainda **não ativados**) que convertem
+/// `in_subtype`→`out_subtype`, na ordem de preferência do sistema. Ativar cada
+/// um custa recurso (uma sessão de NVENC, por exemplo), então a ativação fica
+/// para o chamador, que tenta um de cada vez e para no primeiro que configurar.
+unsafe fn find_activates(
+    category: GUID,
+    in_subtype: GUID,
+    out_subtype: GUID,
+    backend: Backend,
+) -> Result<Vec<IMFActivate>> {
     unsafe {
-        find_transform(
-            MFT_CATEGORY_VIDEO_ENCODER,
-            MFVideoFormat_NV12,
-            MFVideoFormat_H264,
-            backend,
-        )
+        let input = MFT_REGISTER_TYPE_INFO {
+            guidMajorType: MFMediaType_Video,
+            guidSubtype: in_subtype,
+        };
+        let output = MFT_REGISTER_TYPE_INFO {
+            guidMajorType: MFMediaType_Video,
+            guidSubtype: out_subtype,
+        };
+
+        let flags = match backend {
+            Backend::Hardware => MFT_ENUM_FLAG_HARDWARE.0 | MFT_ENUM_FLAG_SORTANDFILTER.0,
+            Backend::Software => MFT_ENUM_FLAG_SYNCMFT.0 | MFT_ENUM_FLAG_SORTANDFILTER.0,
+        };
+
+        let mut activates: *mut Option<IMFActivate> = std::ptr::null_mut();
+        let mut count: u32 = 0;
+        MFTEnumEx(
+            category,
+            MFT_ENUM_FLAG(flags),
+            Some(&input),
+            Some(&output),
+            &mut activates,
+            &mut count,
+        )?;
+
+        if count == 0 || activates.is_null() {
+            return Err(windows::core::Error::new(
+                MF_E_TOPO_CODEC_NOT_FOUND,
+                "nenhum MFT disponível para este backend",
+            ));
+        }
+
+        let list = std::slice::from_raw_parts(activates, count as usize);
+        let candidatos: Vec<IMFActivate> = list.iter().flatten().cloned().collect();
+
+        // Os ponteiros COM foram clonados acima; resta liberar o array que o
+        // MFTEnumEx alocou.
+        CoTaskMemFree(Some(activates as *const c_void));
+
+        Ok(candidatos)
     }
 }
 

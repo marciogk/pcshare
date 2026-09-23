@@ -937,6 +937,48 @@ fn resolucao_alvo(nw: u32, nh: u32, rw: u32, rh: u32) -> (u32, u32) {
     (ow.max(2), oh.max(2))
 }
 
+/// Encolhe uma imagem BGRA de `(sw, sh)` para `(dw, dh)` por **média de área**:
+/// cada pixel de destino é a média da caixa de origem que ele cobre. É o filtro
+/// certo para reduzir — pegar um pixel só (vizinho mais próximo) serrilha e
+/// perde detalhe, e é justamente o que faz a tela cheia borrar quando o encoder
+/// de software não reduz por conta própria.
+///
+/// Espera linhas contíguas (`sw * 4` bytes), como a captura entrega, e escreve o
+/// mesmo formato em `dst`. Só serve para encolher (`dw <= sw`, `dh <= sh`); o
+/// chamador garante isso via `resolucao_alvo`, que nunca amplia. Roda só nos
+/// quadros que mudaram, e para uma redução leve (~1080p → ~768p) cada pixel de
+/// origem é lido cerca de uma vez — custo de poucos milissegundos.
+fn reduzir_bgra(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize, dst: &mut Vec<u8>) {
+    dst.clear();
+    dst.resize(dw * dh * 4, 0);
+    for dy in 0..dh {
+        let sy0 = dy * sh / dh;
+        let sy1 = (((dy + 1) * sh / dh).max(sy0 + 1)).min(sh);
+        for dx in 0..dw {
+            let sx0 = dx * sw / dw;
+            let sx1 = (((dx + 1) * sw / dw).max(sx0 + 1)).min(sw);
+            let (mut b, mut g, mut r, mut a) = (0u32, 0u32, 0u32, 0u32);
+            let mut n = 0u32;
+            for sy in sy0..sy1 {
+                let base = sy * sw * 4;
+                for sx in sx0..sx1 {
+                    let i = base + sx * 4;
+                    b += src[i] as u32;
+                    g += src[i + 1] as u32;
+                    r += src[i + 2] as u32;
+                    a += src[i + 3] as u32;
+                    n += 1;
+                }
+            }
+            let o = (dy * dw + dx) * 4;
+            dst[o] = (b / n) as u8;
+            dst[o + 1] = (g / n) as u8;
+            dst[o + 2] = (r / n) as u8;
+            dst[o + 3] = (a / n) as u8;
+        }
+    }
+}
+
 /// Tamanho do monitor principal, em pixels. É o que o viewer pede ao host, para
 /// não receber mais pixels do que a tela dele mostra.
 fn tamanho_monitor() -> (u32, u32) {
@@ -1001,14 +1043,24 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
     };
     let gpu_direct = enc.is_gpu_direct();
 
-    // Só reduz no caminho GPU. No caminho por CPU, mantém o nativo.
+    // Reduz para o monitor do viewer nos DOIS caminhos. No caminho GPU, o
+    // processador de vídeo encolhe por hardware; no de software, encolhemos a
+    // BGRA na CPU antes de converter (`reduzir_bgra`). Concentrar os bits em
+    // menos pixels é o que devolve a nitidez: sem isso, a tela cheia em 1080p é
+    // comprimida com força e ainda encolhida no viewer — o borrado que apareceu
+    // na máquina sem encoder de hardware (22/09/2026).
     let (mut ow, mut oh) = match pedido {
-        Some((rw, rh)) if gpu_direct => resolucao_alvo(nw, nh, rw, rh),
-        _ => (nw, nh),
+        Some((rw, rh)) => resolucao_alvo(nw, nh, rw, rh),
+        None => (nw, nh),
     };
     if (ow, oh) != (nw, nh) {
         println!("host: reduzindo {nw}x{nh} -> {ow}x{oh} para o monitor do viewer");
-        match H264Encoder::with_gpu(&gpu, ow, oh, fps(), bitrate()) {
+        let recriado = if gpu_direct {
+            H264Encoder::with_gpu(&gpu, ow, oh, fps(), bitrate())
+        } else {
+            H264Encoder::new(ow, oh, fps(), bitrate())
+        };
+        match recriado {
             Ok(e) => enc = e,
             Err(e) => {
                 eprintln!("host: encoder reduzido falhou ({e}); mantendo {nw}x{nh}");
@@ -1043,6 +1095,7 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
     t.send(hello.channel(), &hello.encode())?;
 
     let mut bgra = Vec::new();
+    let mut bgra_red = Vec::new();
     let mut nv12 = Vec::new();
     let mut seq = 0u64;
     let mut stats = HostStats::default();
@@ -1216,7 +1269,23 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
             stats.readback_ms.push(ms(t0));
 
             let t1 = Instant::now();
-            bgra_to_nv12(&bgra, nw as usize, nh as usize, &mut nv12);
+            if (ow, oh) != (nw, nh) {
+                // Encolhe na CPU antes de converter: o encoder de software não
+                // reduz sozinho, e o processador de vídeo da GPU não está no
+                // caminho aqui. Só nos quadros que mudaram (a supressão acima já
+                // barrou os iguais), então o custo não pesa na tela ociosa.
+                reduzir_bgra(
+                    &bgra,
+                    nw as usize,
+                    nh as usize,
+                    ow as usize,
+                    oh as usize,
+                    &mut bgra_red,
+                );
+                bgra_to_nv12(&bgra_red, ow as usize, oh as usize, &mut nv12);
+            } else {
+                bgra_to_nv12(&bgra, nw as usize, nh as usize, &mut nv12);
+            }
             stats.convert_ms.push(ms(t1));
 
             let t2 = Instant::now();
@@ -2017,6 +2086,72 @@ fn pct(sorted: &[f64], p: f64) -> f64 {
         return 0.0;
     }
     sorted[((sorted.len() - 1) as f64 * p).round() as usize]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reduzir pela metade uma imagem BGRA de cor sólida devolve a mesma cor,
+    /// no tamanho certo — média de área não inventa nem lava a cor.
+    #[test]
+    fn reduzir_bgra_cor_solida_preserva_cor() {
+        let (sw, sh) = (8usize, 6usize);
+        let (dw, dh) = (4usize, 3usize);
+        // BGRA sólido: B=10, G=20, R=30, A=255.
+        let src: Vec<u8> = std::iter::repeat([10u8, 20, 30, 255])
+            .take(sw * sh)
+            .flatten()
+            .collect();
+        let mut dst = Vec::new();
+        reduzir_bgra(&src, sw, sh, dw, dh, &mut dst);
+
+        assert_eq!(dst.len(), dw * dh * 4);
+        for px in dst.chunks_exact(4) {
+            assert_eq!(px, [10, 20, 30, 255]);
+        }
+    }
+
+    /// Reduzir um quadriculado 2x2 (cada quadrante uma cor) para 2x2 dá um pixel
+    /// por quadrante com a cor daquele quadrante — a caixa de origem certa vai
+    /// para o destino certo, sem espelhar nem trocar eixos.
+    #[test]
+    fn reduzir_bgra_mapeia_quadrantes() {
+        let (sw, sh) = (4usize, 4usize);
+        let cor = |x: usize, y: usize| -> [u8; 4] {
+            match (x < 2, y < 2) {
+                (true, true) => [1, 1, 1, 255],    // topo-esquerda
+                (false, true) => [2, 2, 2, 255],   // topo-direita
+                (true, false) => [3, 3, 3, 255],   // base-esquerda
+                (false, false) => [4, 4, 4, 255],  // base-direita
+            }
+        };
+        let mut src = vec![0u8; sw * sh * 4];
+        for y in 0..sh {
+            for x in 0..sw {
+                let i = (y * sw + x) * 4;
+                src[i..i + 4].copy_from_slice(&cor(x, y));
+            }
+        }
+        let mut dst = Vec::new();
+        reduzir_bgra(&src, sw, sh, 2, 2, &mut dst);
+
+        let em = |x: usize, y: usize| dst[(y * 2 + x) * 4];
+        assert_eq!(em(0, 0), 1);
+        assert_eq!(em(1, 0), 2);
+        assert_eq!(em(0, 1), 3);
+        assert_eq!(em(1, 1), 4);
+    }
+
+    /// `resolucao_alvo` já garante não ampliar; conferimos que a redução casa
+    /// com o monitor do viewer (1360x768) a partir de 1080p, em dimensões pares.
+    #[test]
+    fn resolucao_alvo_reduz_para_o_monitor() {
+        let (ow, oh) = resolucao_alvo(1920, 1080, 1360, 768);
+        assert_eq!(ow, 1360);
+        assert_eq!(oh & 1, 0, "altura tem de ser par (NV12)");
+        assert!(oh <= 768 && oh >= 760, "proporção preservada: {oh}");
+    }
 }
 
 
