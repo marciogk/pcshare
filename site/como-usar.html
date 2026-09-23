@@ -122,20 +122,24 @@
 
   /* numbered steps */
   .gsteps{list-style:none; counter-reset:g; margin:0; padding:0; display:flex; flex-direction:column; gap:2px}
-  .gstep{position:relative; display:grid; grid-template-columns:auto 1fr; gap:18px; padding:8px 0 26px}
+  /* Número fixo à esquerda (posição absoluta) e o conteúdo ocupando a largura
+     toda com um recuo à esquerda — assim o texto fica sempre alinhado à
+     esquerda e nunca é espremido numa coluna estreita. */
+  .gstep{position:relative; padding:0 0 28px 58px}
   .gstep::before{
     counter-increment:g; content:counter(g);
-    grid-row:1 / span 2; width:38px; height:38px; border-radius:50%;
+    position:absolute; left:0; top:0;
+    width:38px; height:38px; border-radius:50%;
     display:grid; place-items:center; font-family:var(--disp); font-weight:700; font-size:1.05rem;
     color:#fff; background:var(--blue); z-index:1;
   }
   .gsteps.free .gstep::before{background:var(--good)}
-  /* connecting line between numbers */
+  /* linha ligando os números */
   .gstep:not(:last-child)::after{
-    content:""; position:absolute; left:18px; top:38px; bottom:0; width:2px; background:var(--line);
+    content:""; position:absolute; left:18px; top:42px; bottom:0; width:2px; background:var(--line);
   }
-  .gstep h3{font-size:1.16rem}
-  .gstep .txt{color:var(--muted); margin-top:6px; font-size:.98rem}
+  .gstep h3{font-size:1.16rem; min-height:38px; display:flex; align-items:center}
+  .gstep .txt{color:var(--muted); margin-top:4px; font-size:.98rem}
   .gstep .txt strong{color:var(--ink)}
   .gstep .btn{margin-top:14px}
   kbd{font-family:var(--mono); font-size:.82em; background:#EEF3FA; border:1px solid var(--line); border-bottom-width:2px; border-radius:6px; padding:.08em .4em; color:var(--ink)}
