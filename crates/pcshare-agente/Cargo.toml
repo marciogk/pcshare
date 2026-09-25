@@ -13,3 +13,4 @@ path = "src/main.rs"
 pcshare-core = { version = "0.0.1", path = "../pcshare-core" }
 pcshare-sessao = { version = "0.0.1", path = "../pcshare-sessao" }
 eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_SystemInformation"] }

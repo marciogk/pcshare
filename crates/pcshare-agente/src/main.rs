@@ -12,6 +12,7 @@ use eframe::egui;
 use egui::Color32;
 use pcshare_core::secure;
 use std::net::SocketAddr;
+use std::os::windows::io::AsRawHandle;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -21,6 +22,50 @@ const ACCENT: Color32 = Color32::from_rgb(0x2E, 0x6F, 0xD6);
 
 fn pasta_pcshare() -> PathBuf {
     PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into())).join("PCShare")
+}
+
+fn caminho_log() -> PathBuf {
+    pasta_pcshare().join("agente.log")
+}
+
+/// Redireciona o diagnóstico do motor (os `println!`/`eprintln!` de captura,
+/// encoder e sessão) para um **arquivo**. O Agente roda sem console no release,
+/// então sem isto não há como saber, num teste remoto, se a máquina entrou pelo
+/// encoder de **hardware** ou caiu no **software** — a diferença entre imagem
+/// nítida e mole. Com o arquivo, o operador puxa o log pela própria sessão
+/// ("Baixar arquivo") e enxerga o que aconteceu do outro lado do mundo.
+///
+/// Funciona porque o Rust busca o handle de stdout/stderr a cada escrita
+/// (`GetStdHandle`), então trocá-lo por um arquivo antes de qualquer saída
+/// redireciona tudo. O handle precisa sobreviver ao processo — daí o `forget`.
+fn iniciar_log() {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Console::{SetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+
+    let _ = std::fs::create_dir_all(pasta_pcshare());
+    let Ok(arquivo) = std::fs::File::create(caminho_log()) else {
+        return;
+    };
+    let h = HANDLE(arquivo.as_raw_handle() as *mut _);
+    unsafe {
+        let _ = SetStdHandle(STD_OUTPUT_HANDLE, h);
+        let _ = SetStdHandle(STD_ERROR_HANDLE, h);
+    }
+    // Mantém o arquivo aberto pela vida do processo, sem fechá-lo no drop.
+    std::mem::forget(arquivo);
+
+    println!("=== PCShare Agente — log iniciado em {} ===", agora_local());
+    println!("(diagnóstico da sessão; o operador pode puxar este arquivo por \"Baixar arquivo\")");
+}
+
+/// Data e hora locais legíveis, para carimbar o início do log.
+fn agora_local() -> String {
+    use windows::Win32::System::SystemInformation::GetLocalTime;
+    let t = unsafe { GetLocalTime() };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
+    )
 }
 
 /// Lê o endereço do encontro do `ui.txt` compartilhado (o mesmo que o operador
@@ -161,6 +206,12 @@ impl eframe::App for App {
                     ui.label("Servidor de encontro:");
                     ui.text_edit_singleline(&mut self.encontro);
                 });
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(format!("Log de diagnóstico: {}", caminho_log().display()))
+                        .small()
+                        .weak(),
+                );
             });
 
             let (sess_msg, sess_ativa) = match self.estado.lock() {
@@ -205,6 +256,10 @@ fn aplicar_tema(ctx: &egui::Context) {
 }
 
 fn main() -> eframe::Result<()> {
+    // Antes de qualquer coisa: manda o diagnóstico para um arquivo, já que aqui
+    // não há console (ver `iniciar_log`).
+    iniciar_log();
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([440.0, 460.0])

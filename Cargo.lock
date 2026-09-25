@@ -1986,6 +1986,7 @@ dependencies = [
  "eframe",
  "pcshare-core",
  "pcshare-sessao",
+ "windows",
 ]
 
 [[package]]
