@@ -1131,6 +1131,17 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
     // estava parada e o host pulava todos os quadros sem nunca mandar o keyframe.
     let mut keyframe_pendente = true;
 
+    // Refinamento da imagem parada: ~REFINAR_APOS depois que a tela assenta, um
+    // keyframe reenvia o quadro inteiro e limpa o "fantasma" que sobra quando
+    // transições rápidas descartam quadros (o delta assenta sobre referência
+    // velha). Feito ATRAVÉS de `keyframe_pendente` — o quadro cai no caminho de
+    // encode normal (um submit por volta) — e NÃO por um bloco de encode
+    // separado, que desincronizava o encoder assíncrono e corrompia a tela
+    // (aquela tentativa foi revertida em c60862f).
+    let mut parado_desde: Option<Instant> = None;
+    let mut refinado = false;
+    const REFINAR_APOS: Duration = Duration::from_millis(250);
+
     loop {
         // ---- mensagens vindas do viewer
         while let Some((channel, payload)) = t.poll()? {
@@ -1245,10 +1256,26 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
         // etapa 2 que numa tela imóvel o encoder gasta banda refinando
         // qualidade sozinho. A resposta não é ajustar o encoder — é não
         // chamá-lo.
-        if !frame.has_changes() && !keyframe_pendente {
-            stats.skipped += 1;
-            t.flush()?;
-            continue;
+        if !frame.has_changes() {
+            // Tela parada. Marca desde quando; passado REFINAR_APOS, pede UM
+            // keyframe para refinar — some o "fantasma" de transições rápidas.
+            let ocioso = *parado_desde.get_or_insert_with(Instant::now);
+            if !refinado && !keyframe_pendente && ocioso.elapsed() >= REFINAR_APOS {
+                enc.request_keyframe();
+                keyframe_pendente = true;
+                refinado = true;
+            }
+            // Sem keyframe a enviar, suprime (economia na tela imóvel). Com um
+            // pendente, cai no encode NORMAL abaixo (seguro, um submit por volta).
+            if !keyframe_pendente {
+                stats.skipped += 1;
+                t.flush()?;
+                continue;
+            }
+        } else {
+            // Mudou de verdade: zera o refinamento para refazer quando parar.
+            parado_desde = None;
+            refinado = false;
         }
 
         // Controle de ritmo, com tolerância — e a tolerância não é detalhe.
