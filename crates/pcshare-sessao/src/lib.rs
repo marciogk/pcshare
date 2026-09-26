@@ -1098,6 +1098,16 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
     let mut bgra_red = Vec::new();
     let mut nv12 = Vec::new();
     let mut seq = 0u64;
+    // Refinamento da imagem parada: ~REFINAR_APOS depois que a tela assenta,
+    // reenviamos UM keyframe do quadro atual, para a imagem parada voltar a
+    // ficar nítida — fotos que chegaram grosseiras (muito detalhe, poucos bits
+    // no primeiro encode) deixam de ficar borradas. É seguro reencodar o quadro
+    // corrente porque o compositor entrega quadros SEM mudança a 60 Hz (ver a
+    // supressão abaixo), então a textura retida continua válida; não guardamos
+    // nada. Um refinamento por período de imobilidade.
+    let mut parado_desde: Option<Instant> = None;
+    let mut refinado = false;
+    const REFINAR_APOS: Duration = Duration::from_millis(250);
     let mut stats = HostStats::default();
     let mut receptor = ReceptorArquivo::novo();
 
@@ -1216,10 +1226,45 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
         // qualidade sozinho. A resposta não é ajustar o encoder — é não
         // chamá-lo.
         if !frame.has_changes() {
+            // Marca o instante em que a tela parou (na primeira volta imóvel).
+            let ocioso = *parado_desde.get_or_insert_with(Instant::now);
+            // Passado o tempo de assentar, e só se o link já escoou, manda um
+            // keyframe do quadro atual — no caminho GPU direto, com a textura
+            // ainda válida. Um só por imobilidade (`refinado`).
+            let deve_refinar =
+                !refinado && ocioso.elapsed() >= REFINAR_APOS && t.pending_out() < BACKLOG_LIMIT;
+            if deve_refinar
+                && let (Some(conv), Some(src)) = (conv.as_mut(), cap.current_texture())
+            {
+                refinado = true;
+                enc.request_keyframe();
+                if let Ok(nv12_tex) = conv.convert(src)
+                    && enc.submit_texture(nv12_tex).is_ok()
+                {
+                    stats.refinos += 1;
+                    let captured_us = now_us();
+                    for p in enc.take_packets() {
+                        let m = Message::Video {
+                            seq,
+                            time_us: captured_us,
+                            is_keyframe: p.is_keyframe,
+                            data: p.data,
+                        };
+                        if t.send(m.channel(), &m.encode()).is_ok() {
+                            seq += 1;
+                            stats.frames += 1;
+                        }
+                    }
+                }
+            }
             stats.skipped += 1;
             t.flush()?;
             continue;
         }
+        // Houve mudança de verdade: a tela está ativa; zera o refinamento, para
+        // que ele volte a acontecer quando ela parar de novo.
+        parado_desde = None;
+        refinado = false;
 
         // Controle de ritmo, com tolerância — e a tolerância não é detalhe.
         //
@@ -1584,6 +1629,9 @@ impl RemetenteArquivo {
 struct HostStats {
     frames: u64,
     skipped: u64,
+    /// Keyframes de refinamento enviados com a tela parada (nitidez da imagem
+    /// imóvel).
+    refinos: u64,
     /// Descartados por pacing: a captura vinha mais rápido que o alvo.
     paced: u64,
     /// Descartados por contrapressão: o link não estava escoando.
@@ -1603,7 +1651,7 @@ impl HostStats {
     fn report<T: Transport>(&mut self, t: &T) {
         println!(
             "host: {} frames | leitura GPU {:.2} ms | BGRA→NV12 {:.2} ms | encode {:.2} ms \
-             | {:.2} Mbps | fila {} KB | ritmo {} desc {} sem-mudanca {}{}{}",
+             | {:.2} Mbps | fila {} KB | ritmo {} desc {} sem-mudanca {}{}{}{}",
             self.frames,
             med(&mut self.readback_ms),
             med(&mut self.convert_ms),
@@ -1613,6 +1661,11 @@ impl HostStats {
             self.paced,
             self.dropped,
             self.skipped,
+            if self.refinos > 0 {
+                format!(" refino {}", self.refinos)
+            } else {
+                String::new()
+            },
             if self.input_events > 0 {
                 format!(
                     " | entrada {}{}",
