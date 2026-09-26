@@ -141,7 +141,7 @@ fn atender_sempre(
 
     log(&format!("sessão: ID desta máquina {meu_id}"));
     log(&format!("sessão: senha {senha}"));
-    if senha_fraca(&senha) {
+    if secure::senha_fraca(&senha) {
         log(
             "sessão: AVISO senha fraca (curta ou pouca variação). O recuo protege \
              contra força bruta, mas antes de expor à internet vale uma senha mais \
@@ -290,13 +290,6 @@ fn recuo_auth(falhas: u32) -> Duration {
     Duration::from_secs(segundos.min(60))
 }
 
-/// Sinaliza uma senha obviamente fraca. Não é medidor de entropia — é o mínimo
-/// para pegar "1234" e "00000000" e nudge o operador antes da internet.
-fn senha_fraca(s: &str) -> bool {
-    let distintos: std::collections::HashSet<char> = s.chars().collect();
-    s.chars().count() < 8 || distintos.len() <= 2
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,13 +304,6 @@ mod tests {
         assert_eq!(recuo_auth(1000), Duration::from_secs(60));
     }
 
-    #[test]
-    fn senha_fraca_pega_os_casos_obvios() {
-        assert!(senha_fraca("482913"), "seis dígitos é curta");
-        assert!(senha_fraca("00000000"), "um caractere repetido");
-        assert!(senha_fraca("abababab"), "só dois distintos, ainda que com 8");
-        assert!(!senha_fraca("k7$Pq2mZ"), "oito variados passa");
-    }
 }
 
 /// Traduz os fins de sessão esperados para linguagem de gente.

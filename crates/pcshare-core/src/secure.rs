@@ -210,6 +210,15 @@ pub fn random_password() -> String {
     format!("{:08}", rand::rng().random_range(0..100_000_000u32))
 }
 
+/// Sinaliza uma senha obviamente fraca. Não é medidor de entropia — é o mínimo
+/// para pegar "1234" e "00000000". A sessão avulsa só **avisa**; o acesso não
+/// assistido, onde a senha fica fixa e a máquina alcançável o tempo todo,
+/// **bloqueia** com base nisto.
+pub fn senha_fraca(s: &str) -> bool {
+    let distintos: std::collections::HashSet<char> = s.chars().collect();
+    s.chars().count() < 8 || distintos.len() <= 2
+}
+
 /// Impressão digital legível, para conferência fora de banda.
 pub fn fingerprint_of(public_key: &[u8]) -> String {
     let d = Blake2s256::digest(public_key);
@@ -909,5 +918,13 @@ mod tests {
     fn chave_privada_de_tamanho_errado_e_rejeitada() {
         assert!(Identity::from_private(vec![0u8; 16]).is_err());
         assert!(Identity::from_private(Vec::new()).is_err());
+    }
+
+    #[test]
+    fn senha_fraca_pega_os_casos_obvios() {
+        assert!(senha_fraca("482913"), "seis dígitos é curta");
+        assert!(senha_fraca("00000000"), "um caractere repetido");
+        assert!(senha_fraca("abababab"), "só dois distintos, ainda que com 8");
+        assert!(!senha_fraca("k7$Pq2mZ"), "oito variados passa");
     }
 }

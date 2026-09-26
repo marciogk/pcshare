@@ -8,6 +8,8 @@
 //! **não pede licença** — a cobrança é toda do lado do operador (o app
 //! `pcshare`). Reusa o motor `pcshare-sessao`; aqui só mora a telinha.
 
+mod sistema;
+
 use eframe::egui;
 use egui::Color32;
 use pcshare_core::secure;
@@ -68,26 +70,42 @@ fn agora_local() -> String {
     )
 }
 
-/// Lê o endereço do encontro do `ui.txt` compartilhado (o mesmo que o operador
-/// usa), ou cai no padrão.
-fn carregar_encontro() -> String {
+/// Arquivo com a senha fixa do acesso não assistido, **cifrada** com DPAPI.
+fn caminho_senha() -> PathBuf {
+    pasta_pcshare().join("senha.bin")
+}
+
+/// Lê o `ui.txt`: o endereço do encontro (ou o padrão) e se o acesso não
+/// assistido está ligado.
+fn carregar_config() -> (String, bool) {
+    let mut encontro = ENCONTRO_PADRAO.to_string();
+    let mut nao_assistido = false;
     if let Ok(txt) = std::fs::read_to_string(pasta_pcshare().join("ui.txt")) {
         for linha in txt.lines() {
             if let Some(v) = linha.strip_prefix("encontro=") {
                 let v = v.trim();
                 if !v.is_empty() {
-                    return v.to_string();
+                    encontro = v.to_string();
                 }
+            } else if let Some(v) = linha.strip_prefix("nao_assistido=") {
+                nao_assistido = v.trim() == "1";
             }
         }
     }
-    ENCONTRO_PADRAO.to_string()
+    (encontro, nao_assistido)
 }
 
-fn salvar_encontro(s: &str) {
+fn salvar_config(encontro: &str, nao_assistido: bool) {
     let dir = pasta_pcshare();
     let _ = std::fs::create_dir_all(&dir);
-    let _ = std::fs::write(dir.join("ui.txt"), format!("encontro={}\n", s.trim()));
+    let _ = std::fs::write(
+        dir.join("ui.txt"),
+        format!(
+            "encontro={}\nnao_assistido={}\n",
+            encontro.trim(),
+            u8::from(nao_assistido)
+        ),
+    );
 }
 
 #[derive(Default)]
@@ -103,6 +121,12 @@ struct App {
     senha: String,
     estado: Arc<Mutex<EstadoSessao>>,
     status: String,
+    /// Acesso não assistido ligado: senha fixa + sobe com o Windows.
+    nao_assistido: bool,
+    /// Já há uma thread de host rodando (evita hospedar em dobro).
+    hospedando: bool,
+    /// Pendência de auto-hospedar no primeiro quadro (modo não assistido).
+    auto_pendente: bool,
 }
 
 impl App {
@@ -110,18 +134,33 @@ impl App {
         aplicar_tema(&cc.egui_ctx);
         let (id_local, fingerprint) = pcshare_sessao::identidade_local()
             .unwrap_or_else(|| ("— erro ao carregar a identidade —".into(), String::new()));
+        let (encontro, nao_assistido) = carregar_config();
+        // No modo não assistido a senha é a FIXA guardada (DPAPI); senão, uma
+        // senha nova de sessão a cada abertura, como sempre.
+        let senha = if nao_assistido {
+            sistema::ler_senha(&caminho_senha()).unwrap_or_else(secure::random_password)
+        } else {
+            secure::random_password()
+        };
         Self {
             id_local,
             fingerprint,
-            encontro: carregar_encontro(),
-            senha: secure::random_password(),
+            encontro,
+            senha,
             estado: Arc::new(Mutex::new(EstadoSessao::default())),
             status: String::new(),
+            nao_assistido,
+            hospedando: false,
+            // Se o modo está ligado, sobe a hospedagem sozinho no 1º quadro.
+            auto_pendente: nao_assistido,
         }
     }
 
     /// Começa a compartilhar a tela desta máquina, numa thread.
     fn compartilhar(&mut self, ctx: &egui::Context) {
+        if self.hospedando {
+            return; // já há um host rodando; não sobe outro
+        }
         if self.senha.trim().is_empty() {
             self.status = "Defina uma senha.".into();
             return;
@@ -133,7 +172,8 @@ impl App {
                 return;
             }
         };
-        salvar_encontro(&self.encontro);
+        salvar_config(&self.encontro, self.nao_assistido);
+        self.hospedando = true;
         self.status = format!(
             "Passe estes dados a quem vai te ajudar — ID {} · senha {}",
             self.id_local,
@@ -156,10 +196,56 @@ impl App {
             let _ = pcshare_sessao::hospedar_por_id(enc, &senha, relatar);
         });
     }
+
+    /// Liga/desliga o acesso não assistido: senha fixa forte (cifrada com
+    /// DPAPI) + início com o Windows. Ao ligar, já começa a hospedar.
+    fn alternar_nao_assistido(&mut self, ligar: bool, ctx: &egui::Context) {
+        if ligar {
+            let senha = self.senha.trim().to_string();
+            if secure::senha_fraca(&senha) {
+                self.status =
+                    "Para acesso não assistido, use uma senha forte: 8+ caracteres variados.".into();
+                self.nao_assistido = false;
+                return;
+            }
+            if self.encontro.trim().parse::<SocketAddr>().is_err() {
+                self.status = "Endereço de encontro inválido (use ip:porta).".into();
+                self.nao_assistido = false;
+                return;
+            }
+            if !sistema::salvar_senha(&caminho_senha(), &senha)
+                || !sistema::definir_inicio_automatico(true)
+            {
+                self.status = "Não foi possível ativar o acesso não assistido.".into();
+                self.nao_assistido = false;
+                return;
+            }
+            self.nao_assistido = true;
+            salvar_config(&self.encontro, true);
+            self.status = format!(
+                "Acesso não assistido LIGADO. Guarde bem: ID {} · senha {}.",
+                self.id_local, senha
+            );
+            self.compartilhar(ctx); // começa a hospedar já (se ainda não)
+        } else {
+            sistema::definir_inicio_automatico(false);
+            sistema::apagar_senha(&caminho_senha());
+            self.nao_assistido = false;
+            salvar_config(&self.encontro, false);
+            self.status = "Acesso não assistido desligado.".into();
+        }
+    }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Modo não assistido: começa minimizado (sobe com o Windows, não deve
+        // pular na cara do usuário) e sobe a hospedagem sozinho, no 1º quadro.
+        if self.auto_pendente {
+            self.auto_pendente = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            self.compartilhar(ctx);
+        }
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(8.0);
             ui.heading("PCShare Agente");
@@ -187,17 +273,49 @@ impl eframe::App for App {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     ui.label("Senha:");
-                    ui.add(egui::TextEdit::singleline(&mut self.senha).desired_width(100.0));
+                    // No modo não assistido a senha é fixa: só de leitura aqui
+                    // (para trocar, desligue o modo).
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.senha)
+                            .desired_width(100.0)
+                            .interactive(!self.nao_assistido),
+                    );
                 });
             });
 
             ui.add_space(12.0);
-            let botao = egui::Button::new(
-                egui::RichText::new("Compartilhar minha tela").color(Color32::WHITE),
-            )
-            .fill(ACCENT);
-            if ui.add_sized([ui.available_width(), 32.0], botao).clicked() {
+            let hospedando = self.hospedando;
+            let rotulo = if hospedando {
+                "Compartilhando esta tela…"
+            } else {
+                "Compartilhar minha tela"
+            };
+            let botao =
+                egui::Button::new(egui::RichText::new(rotulo).color(Color32::WHITE)).fill(ACCENT);
+            let clicou = ui.add_sized([ui.available_width(), 32.0], botao).clicked();
+            if clicou && !hospedando {
                 self.compartilhar(ctx);
+            }
+
+            // Acesso não assistido: sobe com o Windows e atende sozinho, com a
+            // senha fixa. Funciona enquanto a máquina está ligada e desbloqueada.
+            ui.add_space(10.0);
+            let mut liga = self.nao_assistido;
+            if ui
+                .checkbox(&mut liga, "Permitir acesso não assistido (iniciar com o Windows)")
+                .changed()
+            {
+                self.alternar_nao_assistido(liga, ctx);
+            }
+            if self.nao_assistido {
+                ui.label(
+                    egui::RichText::new(
+                        "Esta máquina fica disponível sempre que estiver ligada e desbloqueada. \
+                         Guarde bem a senha.",
+                    )
+                    .small()
+                    .weak(),
+                );
             }
 
             ui.add_space(12.0);
@@ -259,6 +377,12 @@ fn main() -> eframe::Result<()> {
     // Antes de qualquer coisa: manda o diagnóstico para um arquivo, já que aqui
     // não há console (ver `iniciar_log`).
     iniciar_log();
+
+    // Uma instância só. O Agente auto-iniciado (chave Run) e um aberto à mão não
+    // podem registrar o mesmo ID em dobro — daria "senha não confere".
+    if !sistema::instancia_unica() {
+        return Ok(());
+    }
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
