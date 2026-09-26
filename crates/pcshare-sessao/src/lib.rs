@@ -1114,9 +1114,19 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
     let frame_period = Duration::from_micros(1_000_000 / fps() as u64);
     let mut last_encoded = Instant::now() - frame_period;
 
+    // Batimento da aplicação para saber que o viewer ainda está aí. O viewer
+    // manda `Ping` a cada 250 ms; se o host ficar mudo por este tempo, o viewer
+    // foi embora. É o que fecha a sessão no **relay** — lá a conexão QUIC não
+    // morre quando o viewer sai (o VPS a mantém viva com keep-alive), então sem
+    // este batimento o host capturava para ninguém, sem nunca voltar a
+    // registrar. (Na conexão direta o próprio transporte já cai.)
+    let mut ultimo_do_viewer = Instant::now();
+    const SILENCIO_VIEWER: Duration = Duration::from_secs(5);
+
     loop {
         // ---- mensagens vindas do viewer
         while let Some((channel, payload)) = t.poll()? {
+            ultimo_do_viewer = Instant::now();
             if channel != Channel::Control {
                 continue;
             }
@@ -1158,6 +1168,17 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Ok(_) | Err(_) => {}
             }
+        }
+
+        // Viewer sumiu? Encerra a sessão para o laço de `atender` voltar a
+        // registrar esta máquina no encontro — senão ela fica "fantasma": on-line
+        // para o host, mas invisível para quem tenta reconectar.
+        if ultimo_do_viewer.elapsed() > SILENCIO_VIEWER {
+            println!(
+                "--- viewer mudo por {}s; encerrando a sessão para voltar a escutar ---",
+                SILENCIO_VIEWER.as_secs()
+            );
+            return Ok(());
         }
 
         // ---- resultado do diálogo de download e um passo do envio
