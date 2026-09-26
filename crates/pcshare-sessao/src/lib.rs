@@ -1123,6 +1123,14 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
     let mut ultimo_do_viewer = Instant::now();
     const SILENCIO_VIEWER: Duration = Duration::from_secs(5);
 
+    // Enquanto houver keyframe pedido (no início da sessão e a cada
+    // `RequestKeyframe`), NÃO suprimimos o quadro mesmo com a tela parada —
+    // senão o viewer, ao (re)conectar numa tela imóvel, nunca recebe o primeiro
+    // quadro e fica branco. Observado na reconexão: o controle funcionava (o
+    // mouse mexia na máquina remota), mas o vídeo não aparecia, porque a tela
+    // estava parada e o host pulava todos os quadros sem nunca mandar o keyframe.
+    let mut keyframe_pendente = true;
+
     loop {
         // ---- mensagens vindas do viewer
         while let Some((channel, payload)) = t.poll()? {
@@ -1145,6 +1153,7 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Ok(Message::RequestKeyframe) => {
                     enc.request_keyframe();
+                    keyframe_pendente = true;
                     stats.keyframe_requests += 1;
                 }
                 Ok(Message::FileOffer { name, size }) => receptor.oferta(&name, size),
@@ -1236,7 +1245,7 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
         // etapa 2 que numa tela imóvel o encoder gasta banda refinando
         // qualidade sozinho. A resposta não é ajustar o encoder — é não
         // chamá-lo.
-        if !frame.has_changes() {
+        if !frame.has_changes() && !keyframe_pendente {
             stats.skipped += 1;
             t.flush()?;
             continue;
@@ -1315,6 +1324,7 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         for p in enc.take_packets() {
+            let ehkeyframe = p.is_keyframe;
             let m = Message::Video {
                 seq,
                 // Carimbo do instante da *captura*, não do envio: é ele que
@@ -1326,6 +1336,12 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
             t.send(m.channel(), &m.encode())?;
             seq += 1;
             stats.frames += 1;
+            // O keyframe pedido saiu de fato (o encoder é assíncrono, então só
+            // limpamos quando o pacote-chave realmente sai). Aí podemos voltar a
+            // suprimir a tela parada.
+            if ehkeyframe {
+                keyframe_pendente = false;
+            }
         }
         t.flush()?;
 
