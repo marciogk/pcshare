@@ -45,8 +45,11 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::proto::MAX_PAYLOAD;
 use crate::transport::{Channel, Transport};
 
-/// Sem tráfego por este tempo, a conexão é considerada morta.
-const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Sem tráfego por este tempo, a conexão é considerada morta. Baixo de propósito
+/// (com folga sobre o keep-alive de 2 s): é o que faz o host **perceber que o
+/// viewer saiu** e voltar a se registrar rápido, para a reconexão não falhar por
+/// segundos a fio. Um viewer que fecha sem aviso é notado em ~5 s, não em 10.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Mantém a associação NAT viva quando a tela está parada.
 const KEEP_ALIVE: Duration = Duration::from_secs(2);
 
