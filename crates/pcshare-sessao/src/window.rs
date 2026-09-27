@@ -42,6 +42,7 @@ const TOOLBAR_H: i32 = 40;
 const ID_ENVIAR: i32 = 1001;
 const ID_BAIXAR: i32 = 1002;
 const ID_SAS: i32 = 1003;
+const ID_GRAVAR: i32 = 1004;
 
 /// Ação disparada por um botão da barra de ferramentas. A janela não age
 /// sozinha: enfileira a intenção, e o laço do viewer — que detém o transporte —
@@ -54,6 +55,8 @@ pub enum SessionCmd {
     DownloadFile,
     /// Mandar Ctrl+Alt+Del à máquina remota (o que o Ctrl+Alt+End faz).
     CtrlAltDel,
+    /// Ligar/desligar a gravação da sessão.
+    ToggleGravar,
 }
 
 /// Evento cru da janela. As coordenadas estão em **pixels da área de vídeo**
@@ -91,6 +94,7 @@ fn hi_word(v: isize) -> i32 {
 pub struct Window {
     hwnd: HWND,
     hdc: HDC,
+    gravar_btn: HWND,
 }
 
 impl Window {
@@ -146,12 +150,14 @@ impl Window {
             let hinst: HINSTANCE = instance.into();
             let font = GetStockObject(DEFAULT_GUI_FONT);
             let mut x = 8;
+            let mut gravar_btn = HWND::default();
             // As setas fazem de ícone: ↑ envia (sobe para o host), ↓ baixa
             // (desce do host). Rendem bem na fonte padrão dos botões.
             for (texto, id, largura) in [
                 (w!("↑ Enviar arquivo"), ID_ENVIAR, 130),
                 (w!("↓ Baixar arquivo"), ID_BAIXAR, 130),
                 (w!("Ctrl+Alt+Del"), ID_SAS, 110),
+                (w!("● Gravar"), ID_GRAVAR, 100),
             ] {
                 let botao = CreateWindowExW(
                     WINDOW_EX_STYLE::default(),
@@ -168,12 +174,23 @@ impl Window {
                     None,
                 )?;
                 SendMessageW(botao, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1)));
+                if id == ID_GRAVAR {
+                    gravar_btn = botao;
+                }
                 x += largura + 6;
             }
 
             CLOSED.store(false, Ordering::SeqCst);
             let hdc = GetDC(Some(hwnd));
-            Ok(Self { hwnd, hdc })
+            Ok(Self { hwnd, hdc, gravar_btn })
+        }
+    }
+
+    /// Alterna o rótulo do botão de gravação conforme o estado.
+    pub fn set_gravando(&self, gravando: bool) {
+        unsafe {
+            let rotulo = if gravando { w!("■ Parar") } else { w!("● Gravar") };
+            let _ = SetWindowTextW(self.gravar_btn, rotulo);
         }
     }
 
@@ -412,6 +429,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     ID_ENVIAR => push(RawEvent::Command(SessionCmd::SendFile)),
                     ID_BAIXAR => push(RawEvent::Command(SessionCmd::DownloadFile)),
                     ID_SAS => push(RawEvent::Command(SessionCmd::CtrlAltDel)),
+                    ID_GRAVAR => push(RawEvent::Command(SessionCmd::ToggleGravar)),
                     _ => {}
                 }
                 // Devolve o foco à janela de vídeo: senão o botão fica com o

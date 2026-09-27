@@ -18,6 +18,7 @@
 //! `docs/SPRINT-0.md`, continua sendo a medida que vale.
 
 use pcshare_input as input;
+mod gravacao;
 pub mod window;
 
 use std::collections::VecDeque;
@@ -736,7 +737,15 @@ fn run_loopback() {
     });
 
     let t = TcpTransport::connect(addr).expect("connect falhou");
-    run_viewer(t, "PCShare — loopback");
+    run_viewer(
+        t,
+        "PCShare — loopback",
+        IdentSessao {
+            operador_id: String::new(),
+            operador_fp: String::new(),
+            host_fp: String::new(),
+        },
+    );
 }
 
 // ---------------------------------------------------------------- host
@@ -874,9 +883,15 @@ fn assistir<T: Transport>(
     plaintext: bool,
     titulo: &str,
 ) {
+    let operador_id = identity.display_id();
+    let operador_fp = identity.fingerprint();
     if plaintext {
         eprintln!("AVISO: sessão SEM criptografia");
-        run_viewer(t, titulo);
+        run_viewer(
+            t,
+            titulo,
+            IdentSessao { operador_id, operador_fp, host_fp: String::new() },
+        );
         return;
     }
     match secure::connect(t, identity, password) {
@@ -884,11 +899,9 @@ fn assistir<T: Transport>(
             // Conferir esta impressão com quem está do outro lado é o que
             // fecha o buraco de intermediação — o servidor de sinalização da
             // Fase 2 não é confiável por natureza.
-            println!(
-                "viewer: host autenticado, impressão {}",
-                sec.remote_fingerprint()
-            );
-            run_viewer(sec, titulo);
+            let host_fp = sec.remote_fingerprint();
+            println!("viewer: host autenticado, impressão {host_fp}");
+            run_viewer(sec, titulo, IdentSessao { operador_id, operador_fp, host_fp });
         }
         Err(e) => eprintln!("viewer: não foi possível autenticar ({e})"),
     }
@@ -1714,7 +1727,22 @@ impl HostStats {
 
 // -------------------------------------------------------------- viewer
 
-fn run_viewer<T: Transport>(mut t: T, titulo: &str) {
+/// Identidades da sessão, levadas ao viewer para a ficha de auditoria da
+/// gravação. No modo `plaintext` (sem Noise) as impressões podem vir vazias.
+struct IdentSessao {
+    operador_id: String,
+    operador_fp: String,
+    host_fp: String,
+}
+
+/// Pasta padrão das gravações: `%USERPROFILE%\Videos\PCShare`.
+fn pasta_gravacoes() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into()))
+        .join("Videos")
+        .join("PCShare")
+}
+
+fn run_viewer<T: Transport>(mut t: T, titulo: &str, ident: IdentSessao) {
     // `--headless <segundos>`: sem janela. Existe para medir a banda de uma
     // tela realmente parada — com janela, ela exibe o que é capturado e cada
     // quadro gera o próximo (realimentação). No headless não pedimos redução de
@@ -1744,6 +1772,10 @@ fn run_viewer<T: Transport>(mut t: T, titulo: &str) {
         return;
     };
     println!("viewer: host anunciou {w}x{h}");
+
+    // Gravação da sessão (opcional, ligada pelo botão da barra). `None` = não
+    // gravando. Alimentada pelos pacotes H.264 no laço de decode abaixo.
+    let mut gravador: Option<gravacao::Gravador> = None;
 
     let mut dec = match H264Decoder::new(w, h, fps()) {
         Ok(d) => d,
@@ -1873,6 +1905,46 @@ fn run_viewer<T: Transport>(mut t: T, titulo: &str) {
                         }
                         println!("viewer: Ctrl+Alt+Del enviado ao host (barra)");
                     }
+                    window::SessionCmd::ToggleGravar => {
+                        if let Some(g) = gravador.take() {
+                            match g.finalizar() {
+                                Ok(p) => println!("viewer: gravação salva em {}", p.display()),
+                                Err(e) => eprintln!("viewer: falha ao finalizar a gravação ({e})"),
+                            }
+                            if let Some(v) = win.as_ref() {
+                                v.set_gravando(false);
+                            }
+                        } else {
+                            let meta = gravacao::MetaSessao {
+                                // O título é decorado ("PCShare — <id>"); a ficha
+                                // de auditoria quer só o ID do host.
+                                host_id: titulo
+                                    .strip_prefix("PCShare — ")
+                                    .unwrap_or(titulo)
+                                    .to_string(),
+                                host_impressao: ident.host_fp.clone(),
+                                operador_id: ident.operador_id.clone(),
+                                operador_impressao: ident.operador_fp.clone(),
+                                largura: w as u16,
+                                altura: h as u16,
+                            };
+                            match gravacao::Gravador::iniciar(&pasta_gravacoes(), meta) {
+                                Ok(g) => {
+                                    gravador = Some(g);
+                                    // Começa num keyframe, senão o vídeo nasce sem referência.
+                                    let m = Message::RequestKeyframe;
+                                    let _ = t.send(m.channel(), &m.encode());
+                                    if let Some(v) = win.as_ref() {
+                                        v.set_gravando(true);
+                                    }
+                                    println!("viewer: gravação iniciada");
+                                }
+                                Err(e) => {
+                                    eprintln!("viewer: não foi possível iniciar a gravação ({e})")
+                                }
+                            }
+                        }
+                    }
                 }
                 continue;
             }
@@ -1973,7 +2045,12 @@ fn run_viewer<T: Transport>(mut t: T, titulo: &str) {
         loop {
             match t.poll() {
                 Ok(Some((_, payload))) => match Message::decode(&payload) {
-                    Ok(Message::Video { time_us, data, .. }) => {
+                    Ok(Message::Video { time_us, data, is_keyframe, .. }) => {
+                        // Grava o pacote (se gravando) ALÉM de decodificar para
+                        // exibir — o fluxo H.264 já é o que vai para o arquivo.
+                        if let Some(g) = gravador.as_mut() {
+                            g.quadro(&data, is_keyframe, time_us);
+                        }
                         pending_time.push_back(time_us);
                         if let Err(e) = dec.decode(&data, 0) {
                             eprintln!("viewer: decode falhou: {e}");
