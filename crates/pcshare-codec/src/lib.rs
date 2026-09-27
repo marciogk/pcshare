@@ -551,6 +551,12 @@ unsafe fn tune_rate_control(
         };
         let mut applied = Vec::new();
 
+        // Abaixo deste bitrate consideramos o link "apertado" e ligamos o teto de
+        // pico; acima (o padrão de 12 Mbps de um link direto) fica no VBR
+        // irrestrito validado. Escolhido para o 12 padrão passar batido e o 3 do
+        // relay entrar na proteção.
+        const LIMIAR_TETO: u32 = 6_000_000;
+
         // O controle de taxa é escolhido POR backend, de propósito:
         //
         // - **Hardware** (Quick Sync / NVENC / AMF): VBR irrestrito, o modo que
@@ -592,16 +598,25 @@ unsafe fn tune_rate_control(
             if codec.SetValue(&CODECAPI_AVEncCommonMaxBitRate, &maxbr).is_ok() {
                 applied.push("teto de banda");
             }
+        } else if bitrate > LIMIAR_TETO {
+            // Link folgado (bitrate alto — o padrão de 12 Mbps de um link direto):
+            // VBR IRRESTRITO, a config validada como "ótima" no teste real
+            // Brasil↔Espanha. Não se mexe no que funciona à distância.
+            let mode = VARIANT::from(eAVEncCommonRateControlMode_UnconstrainedVBR.0 as u32);
+            if codec
+                .SetValue(&CODECAPI_AVEncCommonRateControlMode, &mode)
+                .is_ok()
+            {
+                applied.push("VBR");
+            }
         } else {
-            // VBR com TETO DE PICO. O irrestrito rende ótima imagem em link
-            // rápido, mas numa mudança grande (trocar de slide, rolar a tela) o
-            // encoder estoura para muito acima da média por um instante — e num
-            // link apertado (relay, upload de casa baixo) esse pico entope o cano
-            // e a tela TRAVA por segundos até escoar. Observado como travadas de
-            // ~10 s "sem lógica" em troca de slide. O teto limita o pico e ele
-            // ACOMPANHA o bitrate: bitrate baixo (link apertado) → teto baixo,
-            // protege; bitrate alto (link rápido) → teto alto, quase não se nota.
-            // `PCSHARE_PICO` sobrepõe o multiplicador (padrão 1.5×).
+            // Link apertado (bitrate baixo, ex.: relay a 3 Mbps): VBR com TETO DE
+            // PICO. O irrestrito, numa mudança grande (trocar de slide, rolar a
+            // tela), estoura para muito acima da média por um instante — e num
+            // link apertado esse pico entope o cano e a tela TRAVA por segundos
+            // até escoar (travadas de ~10 s "sem lógica"). O teto limita o pico e
+            // acompanha o bitrate. Só entra em bitrate baixo, então NÃO afeta a
+            // conexão direta no padrão. `PCSHARE_PICO` sobrepõe (padrão 1.5×).
             let mult = std::env::var("PCSHARE_PICO")
                 .ok()
                 .and_then(|v| v.parse::<f32>().ok())
