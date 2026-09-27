@@ -1777,6 +1777,27 @@ fn run_viewer<T: Transport>(mut t: T, titulo: &str, ident: IdentSessao) {
     // gravando. Alimentada pelos pacotes H.264 no laço de decode abaixo.
     let mut gravador: Option<gravacao::Gravador> = None;
 
+    // Reordenação de quadros. O vídeo vai num fluxo QUIC **por quadro**, e
+    // fluxos diferentes chegam fora de ordem sob rajada (mexer o mouse gera
+    // muitos quadros de uma vez). Decodificar fora de ordem corrompe a tela em
+    // blocos — um quadro-P assenta sobre a referência errada. Os quadros não se
+    // perderam: só chegaram trocados. Então os RECOLOCAMOS em ordem por `seq`
+    // (o host numera cada quadro enviado, contíguo) num buffer curto: entrega em
+    // ordem, sem glitch e sem keyframe. Só quando um quadro REALMENTE some
+    // (perda, e o buraco não fecha a tempo) é que pedimos um keyframe para
+    // ressincronizar — e, como o host não manda keyframe periódico e suprime a
+    // tela parada, é esse pedido que evita a tela ficar quebrada para sempre.
+    let mut proximo_seq: Option<u64> = None; // None até o 1º keyframe ancorar
+    let mut buffer_seq: std::collections::BTreeMap<u64, (Vec<u8>, i64, bool)> =
+        std::collections::BTreeMap::new();
+    let mut buraco_desde: Option<Instant> = None;
+    let mut ultimo_pedido_kf = Instant::now();
+    // Tolera reordenação até aqui antes de tratar como perda; um quadro fora de
+    // ordem costuma chegar em poucos ms, então isto raramente estoura.
+    const ESPERA_REORDENA: Duration = Duration::from_millis(120);
+    const REPETIR_PEDIDO_KF: Duration = Duration::from_millis(500);
+    const MAX_BUFFER: usize = 180; // teto de segurança (perda longa)
+
     let mut dec = match H264Decoder::new(w, h, fps()) {
         Ok(d) => d,
         Err(e) => {
@@ -2045,17 +2066,25 @@ fn run_viewer<T: Transport>(mut t: T, titulo: &str, ident: IdentSessao) {
         loop {
             match t.poll() {
                 Ok(Some((_, payload))) => match Message::decode(&payload) {
-                    Ok(Message::Video { time_us, data, is_keyframe, .. }) => {
-                        // Grava o pacote (se gravando) ALÉM de decodificar para
-                        // exibir — o fluxo H.264 já é o que vai para o arquivo.
-                        if let Some(g) = gravador.as_mut() {
-                            g.quadro(&data, is_keyframe, time_us);
+                    Ok(Message::Video { seq, time_us, data, is_keyframe }) => {
+                        // Um keyframe reancora tudo: joga fora o que ficou preso
+                        // no buffer e recomeça a contagem dele. É o que traz de
+                        // volta depois de uma perda real.
+                        if is_keyframe {
+                            buffer_seq.clear();
+                            buraco_desde = None;
+                            proximo_seq = Some(seq);
                         }
-                        pending_time.push_back(time_us);
-                        if let Err(e) = dec.decode(&data, 0) {
-                            eprintln!("viewer: decode falhou: {e}");
+                        // Guarda o quadro para a drenagem em ordem, logo abaixo.
+                        // Antes do 1º keyframe (sem âncora) um quadro-P é inútil;
+                        // e um quadro anterior ao que já decodificamos é atrasado.
+                        match proximo_seq {
+                            Some(p) if seq < p => {} // atrasado — ignora
+                            Some(_) => {
+                                buffer_seq.insert(seq, (data, time_us, is_keyframe));
+                            }
+                            None => {} // ainda sem keyframe — descarta o P-frame
                         }
-                        got_any = true;
                     }
                     // `sent_us` volta intacto: o RTT sai de uma subtração
                     // local, então vale mesmo entre máquinas com relógios
@@ -2076,6 +2105,53 @@ fn run_viewer<T: Transport>(mut t: T, titulo: &str, ident: IdentSessao) {
                     return;
                 }
             }
+        }
+
+        // Drena o buffer EM ORDEM: enquanto o próximo `seq` já chegou,
+        // decodifica-o e avança. No caso comum (em ordem) isto decodifica na
+        // hora, sem atraso; só um quadro que chegou trocado espera aqui o
+        // antecessor — por poucos ms.
+        if let Some(mut p) = proximo_seq {
+            while let Some((dados, tempo, kf)) = buffer_seq.remove(&p) {
+                // Grava o pacote (se gravando) ALÉM de decodificar para exibir —
+                // e já em ordem, então o MP4 sai limpo.
+                if let Some(g) = gravador.as_mut() {
+                    g.quadro(&dados, kf, tempo);
+                }
+                pending_time.push_back(tempo);
+                if let Err(e) = dec.decode(&dados, 0) {
+                    eprintln!("viewer: decode falhou: {e}");
+                }
+                got_any = true;
+                p = p.wrapping_add(1);
+            }
+            proximo_seq = Some(p);
+        }
+
+        // Sobrou quadro no buffer (ou nem ancoramos ainda)? Então falta o
+        // `proximo_seq`. Se for reordenação, ele chega já já e a drenagem acima
+        // o pega. Mas se o buraco persistir além de ESPERA_REORDENA — ou o
+        // buffer estourar —, é perda de verdade: pede um keyframe para
+        // ressincronizar (repetindo, pois o pedido pode se perder no relay).
+        let falta = proximo_seq.is_none() || !buffer_seq.is_empty();
+        if falta {
+            let desde = *buraco_desde.get_or_insert_with(Instant::now);
+            let estourou = buffer_seq.len() > MAX_BUFFER;
+            if (desde.elapsed() >= ESPERA_REORDENA || estourou)
+                && ultimo_pedido_kf.elapsed() >= REPETIR_PEDIDO_KF
+            {
+                let m = Message::RequestKeyframe;
+                let _ = t.send(m.channel(), &m.encode());
+                ultimo_pedido_kf = Instant::now();
+                // Sem o quadro que falta, o buffer acumulado não serve para
+                // nada — o keyframe recomeça a cadeia. Solta a memória.
+                if estourou {
+                    buffer_seq.clear();
+                    proximo_seq = None;
+                }
+            }
+        } else {
+            buraco_desde = None;
         }
 
         // Todo frame precisa ser *decodificado* — H.264 é interdependente e

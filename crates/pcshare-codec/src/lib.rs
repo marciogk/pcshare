@@ -593,13 +593,39 @@ unsafe fn tune_rate_control(
                 applied.push("teto de banda");
             }
         } else {
-            // VBR irrestrito: gasta bits quando a cena muda, quase nada parada.
-            let mode = VARIANT::from(eAVEncCommonRateControlMode_UnconstrainedVBR.0 as u32);
+            // VBR com TETO DE PICO. O irrestrito rende ótima imagem em link
+            // rápido, mas numa mudança grande (trocar de slide, rolar a tela) o
+            // encoder estoura para muito acima da média por um instante — e num
+            // link apertado (relay, upload de casa baixo) esse pico entope o cano
+            // e a tela TRAVA por segundos até escoar. Observado como travadas de
+            // ~10 s "sem lógica" em troca de slide. O teto limita o pico e ele
+            // ACOMPANHA o bitrate: bitrate baixo (link apertado) → teto baixo,
+            // protege; bitrate alto (link rápido) → teto alto, quase não se nota.
+            // `PCSHARE_PICO` sobrepõe o multiplicador (padrão 1.5×).
+            let mult = std::env::var("PCSHARE_PICO")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+                .filter(|m| (1.0..=8.0).contains(m))
+                .unwrap_or(1.5);
+            let pico = ((bitrate as f32) * mult) as u32;
+            let mode = VARIANT::from(eAVEncCommonRateControlMode_PeakConstrainedVBR.0 as u32);
             if codec
                 .SetValue(&CODECAPI_AVEncCommonRateControlMode, &mode)
                 .is_ok()
             {
-                applied.push("VBR");
+                applied.push("VBR c/ teto");
+                let media = VARIANT::from(bitrate);
+                let _ = codec.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &media);
+                let teto = VARIANT::from(pico);
+                if codec.SetValue(&CODECAPI_AVEncCommonMaxBitRate, &teto).is_ok() {
+                    applied.push("pico limitado");
+                }
+            } else {
+                // Driver antigo sem PeakConstrained: volta ao irrestrito.
+                let m2 = VARIANT::from(eAVEncCommonRateControlMode_UnconstrainedVBR.0 as u32);
+                if codec.SetValue(&CODECAPI_AVEncCommonRateControlMode, &m2).is_ok() {
+                    applied.push("VBR");
+                }
             }
         }
 
