@@ -119,6 +119,18 @@ static SAME_PROCESS: AtomicBool = AtomicBool::new(false);
 /// atropelariam a linha de progresso.
 static QUIET: AtomicBool = AtomicBool::new(false);
 
+/// Ligado quando o operador está GRAVANDO a sessão em curso (o viewer avisa por
+/// `Message::EstadoGravacao`). O app do host (agente) lê via [`gravando_remoto`]
+/// para mostrar o aviso de transparência à pessoa. `run_host` zera ao entrar e
+/// ao sair da sessão, então nunca fica "preso" ligado entre atendimentos.
+static GRAVANDO_REMOTO: AtomicBool = AtomicBool::new(false);
+
+/// O operador está gravando a sessão em curso? Para o app do host avisar a
+/// pessoa que o atendimento está sendo gravado (transparência/LGPD).
+pub fn gravando_remoto() -> bool {
+    GRAVANDO_REMOTO.load(Ordering::Relaxed)
+}
+
 fn now_us() -> i64 {
     START.get_or_init(Instant::now).elapsed().as_micros() as i64
 }
@@ -1019,6 +1031,18 @@ fn resolucao_desejada() -> (u32, u32) {
 }
 
 fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
+    // Zera o aviso de gravação ao entrar e — via este guarda — ao SAIR da sessão
+    // (qualquer caminho de retorno), para o aviso não ficar preso ligado entre
+    // um atendimento e o próximo.
+    GRAVANDO_REMOTO.store(false, Ordering::Relaxed);
+    struct ZeraGravacao;
+    impl Drop for ZeraGravacao {
+        fn drop(&mut self) {
+            GRAVANDO_REMOTO.store(false, Ordering::Relaxed);
+        }
+    }
+    let _zera_gravacao = ZeraGravacao;
+
     // `--cpu-path` força o caminho antigo (leitura da GPU + conversão na CPU),
     // para comparação A/B com o caminho sem cópia.
     let force_cpu = std::env::args().any(|a| a == "--cpu-path");
@@ -1179,6 +1203,16 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
                     enc.request_keyframe();
                     keyframe_pendente = true;
                     stats.keyframe_requests += 1;
+                }
+                Ok(Message::EstadoGravacao(on)) => {
+                    // Transparência (LGPD): a pessoa desta máquina tem o direito
+                    // de saber que o atendimento está sendo gravado. Marca o
+                    // estado (o app do host mostra o aviso) e deixa no log.
+                    GRAVANDO_REMOTO.store(on, Ordering::Relaxed);
+                    println!(
+                        "host: o operador {} a gravação desta sessão",
+                        if on { "INICIOU" } else { "parou" }
+                    );
                 }
                 Ok(Message::FileOffer { name, size }) => receptor.oferta(&name, size),
                 Ok(Message::FileChunk { data }) => receptor.pedaco(&data),
@@ -1932,6 +1966,9 @@ fn run_viewer<T: Transport>(mut t: T, titulo: &str, ident: IdentSessao) {
                                 Ok(p) => println!("viewer: gravação salva em {}", p.display()),
                                 Err(e) => eprintln!("viewer: falha ao finalizar a gravação ({e})"),
                             }
+                            // Avisa o host que parou (transparência/LGPD).
+                            let aviso = Message::EstadoGravacao(false);
+                            let _ = t.send(aviso.channel(), &aviso.encode());
                             if let Some(v) = win.as_ref() {
                                 v.set_gravando(false);
                             }
@@ -1955,6 +1992,10 @@ fn run_viewer<T: Transport>(mut t: T, titulo: &str, ident: IdentSessao) {
                                     // Começa num keyframe, senão o vídeo nasce sem referência.
                                     let m = Message::RequestKeyframe;
                                     let _ = t.send(m.channel(), &m.encode());
+                                    // Avisa o host que a gravação começou — ele
+                                    // mostra à pessoa e registra (transparência/LGPD).
+                                    let aviso = Message::EstadoGravacao(true);
+                                    let _ = t.send(aviso.channel(), &aviso.encode());
                                     if let Some(v) = win.as_ref() {
                                         v.set_gravando(true);
                                     }

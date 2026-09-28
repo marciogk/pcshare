@@ -108,6 +108,12 @@ pub enum Message {
     /// borrão de encolher a imagem só na exibição. O host nunca amplia: se a
     /// tela dele já é menor, ignora.
     SetResolution { width: u32, height: u32 },
+    /// Viewer → host: o operador LIGOU/DESLIGOU a gravação desta sessão.
+    ///
+    /// Transparência (LGPD): a pessoa na máquina de destino tem o direito de
+    /// saber que o atendimento está sendo gravado. O host avisa na tela e
+    /// registra no log ao receber isto.
+    EstadoGravacao(bool),
 }
 
 const TAG_HELLO: u8 = 0x01;
@@ -122,6 +128,7 @@ const TAG_FILE_CHUNK: u8 = 0x09;
 const TAG_FILE_END: u8 = 0x0A;
 const TAG_REQUEST_FILE: u8 = 0x0B;
 const TAG_SET_RESOLUTION: u8 = 0x0C;
+const TAG_ESTADO_GRAVACAO: u8 = 0x0D;
 
 const IN_MOUSE_MOVE: u8 = 0x01;
 const IN_MOUSE_BUTTON: u8 = 0x02;
@@ -184,6 +191,10 @@ impl Message {
                 put_u32(&mut b, *width);
                 put_u32(&mut b, *height);
             }
+            Message::EstadoGravacao(on) => {
+                b.push(TAG_ESTADO_GRAVACAO);
+                b.push(u8::from(*on));
+            }
             Message::Input(ev) => {
                 b.push(TAG_INPUT);
                 encode_input(&mut b, ev);
@@ -244,6 +255,7 @@ impl Message {
                 width: r.u32()?,
                 height: r.u32()?,
             },
+            TAG_ESTADO_GRAVACAO => Message::EstadoGravacao(r.u8()? != 0),
             TAG_INPUT => Message::Input(decode_input(&mut r)?),
             TAG_PING => Message::Ping {
                 nonce: r.u64()?,
@@ -415,6 +427,8 @@ mod tests {
             width: 1360,
             height: 768,
         });
+        roundtrip(Message::EstadoGravacao(true));
+        roundtrip(Message::EstadoGravacao(false));
         roundtrip(Message::Ping {
             nonce: 7,
             sent_us: 123456789,

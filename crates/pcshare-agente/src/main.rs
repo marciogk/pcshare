@@ -17,6 +17,7 @@ use std::net::SocketAddr;
 use std::os::windows::io::AsRawHandle;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// Mesmo servidor de encontro do operador (o VPS). Editável em Configurações.
 const ENCONTRO_PADRAO: &str = "198.50.117.107:7100";
@@ -246,7 +247,38 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
             self.compartilhar(ctx);
         }
+        // Enquanto o host estiver compartilhando, repinta de tempos em tempos
+        // para captar o estado de gravação (que muda numa thread, sem evento de
+        // interface). 400 ms é imperceptível e a faixa aparece/some quase na
+        // hora.
+        if self.hospedando {
+            ctx.request_repaint_after(Duration::from_millis(400));
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
+            // Transparência (LGPD): enquanto o operador estiver gravando, uma
+            // faixa vermelha inconfundível avisa a pessoa desta máquina.
+            if self.hospedando && pcshare_sessao::gravando_remoto() {
+                egui::Frame::group(ui.style())
+                    .fill(Color32::from_rgb(0xC0, 0x28, 0x28))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            let (rect, _) = ui
+                                .allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                            ui.painter().circle_filled(rect.center(), 6.0, Color32::WHITE);
+                            ui.label(
+                                egui::RichText::new(
+                                    "Esta sessão está sendo GRAVADA pelo operador",
+                                )
+                                .color(Color32::WHITE)
+                                .strong(),
+                            );
+                        });
+                    });
+                ui.add_space(6.0);
+            }
+
             ui.add_space(8.0);
             ui.heading("PCShare Agente");
             ui.label(egui::RichText::new("Permitir acesso à minha máquina").weak());
