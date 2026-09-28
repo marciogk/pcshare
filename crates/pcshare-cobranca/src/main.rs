@@ -153,20 +153,14 @@ fn tratar(req: &mut tiny_http::Request, cfg: &Config) -> u16 {
     };
 
     let evento = v["event"].as_str().unwrap_or("");
-    let pag = &v["payment"];
-    let pag_id = pag["id"].as_str().unwrap_or("");
-    let status = pag["status"].as_str().unwrap_or("");
-    let valor = pag["value"].as_f64().unwrap_or(0.0);
-    let cliente_id = pag["customer"].as_str().unwrap_or("");
+    let pag_id = v["payment"]["id"].as_str().unwrap_or("");
 
-    // 3) Só nos interessa pagamento efetivado. Qualquer outro evento: ignora.
-    let pago = matches!(evento, "PAYMENT_CONFIRMED" | "PAYMENT_RECEIVED")
-        && matches!(status, "CONFIRMED" | "RECEIVED");
-    if !pago {
+    // 3) Só tratamos eventos de pagamento efetivado. Qualquer outro: ignora.
+    if !matches!(evento, "PAYMENT_CONFIRMED" | "PAYMENT_RECEIVED") {
         return 200;
     }
-    if pag_id.is_empty() || cliente_id.is_empty() {
-        eprintln!("cobranca: evento {evento} sem id de pagamento/cliente — ignorado");
+    if pag_id.is_empty() {
+        eprintln!("cobranca: evento {evento} sem id de pagamento — ignorado");
         return 200;
     }
 
@@ -176,14 +170,39 @@ fn tratar(req: &mut tiny_http::Request, cfg: &Config) -> u16 {
         return 200;
     }
 
-    // 5) Valor. Só emite pela venda do valor certo (evita outro produto/valor).
+    // 5) RECONFIRMA na fonte. Em vez de confiar no corpo do aviso, consulta o
+    //    pagamento na API do Asaas e usa o status/valor/cliente que ELE informa.
+    //    Assim, mesmo que o token vaze, ninguém emite licença sem um pagamento
+    //    REAL e confirmado — um aviso forjado aponta para um id que não existe.
+    let (status, valor, cliente_id) = match buscar_pagamento(cfg, pag_id) {
+        Ok(x) => x,
+        Err((404, _)) => {
+            eprintln!("cobranca: pagamento {pag_id} não existe no Asaas — ignorado");
+            return 200;
+        }
+        Err((_, msg)) => {
+            eprintln!("cobranca: falha ao reconfirmar {pag_id}: {msg}");
+            return 500; // transitório: o Asaas reenvia
+        }
+    };
+    // RECEIVED (Pix/boleto pago), CONFIRMED (cartão) e RECEIVED_IN_CASH
+    // (confirmado à mão pelo dono da conta — cobre venda paga por fora). Só o
+    // dono da conta consegue marcar in cash, então não é brecha.
+    if !matches!(status.as_str(), "CONFIRMED" | "RECEIVED" | "RECEIVED_IN_CASH") {
+        println!("cobranca: pagamento {pag_id} com status {status} (não pago) — ignora");
+        return 200;
+    }
     if (valor - cfg.valor).abs() > 0.01 {
         eprintln!("cobranca: pagamento {pag_id} de R$ {valor:.2} ≠ R$ {:.2} — não emite", cfg.valor);
         return 200;
     }
+    if cliente_id.is_empty() {
+        eprintln!("cobranca: pagamento {pag_id} sem cliente — ignora");
+        return 200;
+    }
 
-    // 6) E-mail do comprador (o webhook traz só o id do cliente).
-    let (email, nome) = match buscar_cliente(cfg, cliente_id) {
+    // 6) E-mail do comprador (id vindo da fonte, reconfirmado).
+    let (email, nome) = match buscar_cliente(cfg, &cliente_id) {
         Ok(x) => x,
         Err(e) => {
             eprintln!("cobranca: falha ao buscar o cliente {cliente_id}: {e}");
@@ -216,6 +235,23 @@ fn tratar(req: &mut tiny_http::Request, cfg: &Config) -> u16 {
         println!("cobranca: chave enviada para {email}");
     }
     200
+}
+
+/// Reconfirma o pagamento direto na API do Asaas — a fonte da verdade. Devolve
+/// `(status, valor, cliente_id)`. O erro carrega o código HTTP para o chamador
+/// separar "não existe" (404 → ignora) de falha transitória (→ reenviar).
+fn buscar_pagamento(cfg: &Config, pag_id: &str) -> Result<(String, f64, String), (u16, String)> {
+    let url = format!("{}/payments/{pag_id}", cfg.asaas_base);
+    let resp = match ureq::get(&url).set("access_token", &cfg.asaas_key).call() {
+        Ok(r) => r,
+        Err(ureq::Error::Status(code, _)) => return Err((code, format!("HTTP {code}"))),
+        Err(e) => return Err((0, e.to_string())),
+    };
+    let v: serde_json::Value = resp.into_json().map_err(|e| (0, e.to_string()))?;
+    let status = v["status"].as_str().unwrap_or("").to_string();
+    let valor = v["value"].as_f64().unwrap_or(0.0);
+    let cliente = v["customer"].as_str().unwrap_or("").trim().to_string();
+    Ok((status, valor, cliente))
 }
 
 /// Busca `(email, nome)` do cliente na API do Asaas.
