@@ -18,7 +18,7 @@
 
 use std::collections::HashSet;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::licencas::{dias_de_texto, formatar_data, hoje_em_dias};
 
@@ -50,11 +50,14 @@ fn ajuda() {
     );
 }
 
-fn emitir(args: &[String]) -> i32 {
-    let caminho = caminho(args);
-    let dias = dias(args);
-    let nota = opt(args, "--nota").unwrap_or("").replace([';', '\n', '\r'], ",");
-    let validade = formatar_data(hoje_em_dias() + dias);
+/// Emite uma licença nova: gera uma chave única, anexa
+/// `chave;validade;ativa;nota` ao arquivo e devolve `(chave, validade)`. É o
+/// mesmo arquivo/formato que o servidor lê para cobrar. **Reusado pelo webhook
+/// de pagamento** (Fase 2) para automatizar a emissão a cada venda.
+pub fn emitir_licenca(caminho: &Path, dias: i64, nota: &str) -> std::io::Result<(String, String)> {
+    let nota = nota.replace([';', '\n', '\r'], ",");
+    let validade = formatar_data(hoje_em_dias() + dias.max(1));
+    let caminho = caminho.to_path_buf();
 
     let existentes = chaves_existentes(&caminho);
     let mut chave = gerar_chave();
@@ -62,19 +65,31 @@ fn emitir(args: &[String]) -> i32 {
         chave = gerar_chave();
     }
 
-    let linha = format!("{chave};{validade};ativa;{}", nota.trim());
-    if let Err(e) = anexar(&caminho, &linha) {
-        eprintln!("erro ao gravar em {}: {e}", caminho.display());
-        return 1;
+    anexar(&caminho, &format!("{chave};{validade};ativa;{}", nota.trim()))?;
+    Ok((chave, validade))
+}
+
+fn emitir(args: &[String]) -> i32 {
+    let caminho = caminho(args);
+    let dias = dias(args);
+    let nota = opt(args, "--nota").unwrap_or("");
+    match emitir_licenca(&caminho, dias, nota) {
+        Ok((chave, validade)) => {
+            println!("Licença emitida:");
+            println!("  chave    : {chave}");
+            println!("  validade : {validade}  ({dias} dias)");
+            let nota = nota.trim();
+            if !nota.is_empty() {
+                println!("  nota     : {nota}");
+            }
+            println!("  arquivo  : {}", caminho.display());
+            0
+        }
+        Err(e) => {
+            eprintln!("erro ao gravar em {}: {e}", caminho.display());
+            1
+        }
     }
-    println!("Licença emitida:");
-    println!("  chave    : {chave}");
-    println!("  validade : {validade}  ({dias} dias)");
-    if !nota.trim().is_empty() {
-        println!("  nota     : {}", nota.trim());
-    }
-    println!("  arquivo  : {}", caminho.display());
-    0
 }
 
 fn listar(args: &[String]) -> i32 {

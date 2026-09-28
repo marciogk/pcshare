@@ -1,0 +1,18 @@
+[package]
+name = "pcshare-cobranca"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "pcshare-cobranca"
+path = "src/main.rs"
+
+[dependencies]
+# Reusa a emissão de licença (mesmo arquivo/formato que o servidor cobra).
+pcshare-encontro = { version = "0.0.1", path = "../pcshare-encontro" }
+# Servidor HTTP minúsculo (recebe o webhook) e cliente HTTP (Asaas + Brevo).
+tiny_http = "0.12"
+ureq = { version = "2", features = ["json"] }
+serde_json = "1"
