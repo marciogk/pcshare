@@ -128,6 +128,9 @@ struct App {
     hospedando: bool,
     /// Pendência de auto-hospedar no primeiro quadro (modo não assistido).
     auto_pendente: bool,
+    /// Última leitura do estado de gravação, para detectar a BORDA de subida
+    /// (parou→gravando) e aí chamar a atenção da pessoa uma única vez.
+    gravando_visto: bool,
 }
 
 impl App {
@@ -154,6 +157,7 @@ impl App {
             hospedando: false,
             // Se o modo está ligado, sobe a hospedagem sozinho no 1º quadro.
             auto_pendente: nao_assistido,
+            gravando_visto: false,
         }
     }
 
@@ -247,18 +251,29 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
             self.compartilhar(ctx);
         }
-        // Enquanto o host estiver compartilhando, repinta de tempos em tempos
-        // para captar o estado de gravação (que muda numa thread, sem evento de
-        // interface). 400 ms é imperceptível e a faixa aparece/some quase na
-        // hora.
+        // O estado de gravação muda numa thread do motor, sem evento de
+        // interface. Enquanto compartilha, repinta de tempos em tempos para
+        // captá-lo (400 ms é imperceptível e a faixa aparece/some quase na hora).
         if self.hospedando {
             ctx.request_repaint_after(Duration::from_millis(400));
         }
+        let gravando = self.hospedando && pcshare_sessao::gravando_remoto();
+        // Borda de subida (parou→gravando): torna o aviso INESCAPÁVEL mesmo se a
+        // pessoa tiver minimizado o Agente — restaura a janela e pisca na barra
+        // de tarefas. Para a transparência da LGPD valer, o aviso não pode
+        // passar despercebido.
+        if gravando && !self.gravando_visto {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Critical,
+            ));
+        }
+        self.gravando_visto = gravando;
 
         egui::CentralPanel::default().show(ctx, |ui| {
             // Transparência (LGPD): enquanto o operador estiver gravando, uma
             // faixa vermelha inconfundível avisa a pessoa desta máquina.
-            if self.hospedando && pcshare_sessao::gravando_remoto() {
+            if gravando {
                 egui::Frame::group(ui.style())
                     .fill(Color32::from_rgb(0xC0, 0x28, 0x28))
                     .show(ui, |ui| {
