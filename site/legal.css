@@ -1,0 +1,42 @@
+/* Estilo das páginas legais do PCShare — combina com a landing (index.html). */
+:root{
+  --navy:#0A1E3D; --blue:#2E6FD6; --cyan:#37B0EA;
+  --ink:#10203A; --muted:#5A7291; --paper:#F3F7FC; --line:#DBE6F3;
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--paper); color:var(--ink);
+  font-family:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+  font-size:16px; line-height:1.65; -webkit-font-smoothing:antialiased;
+}
+a{color:var(--blue); text-decoration:none} a:hover{text-decoration:underline}
+.wrap{max-width:820px; margin-inline:auto; padding:0 20px}
+
+header.top{background:var(--navy); color:#EAF2FB}
+header.top .wrap{display:flex; align-items:center; justify-content:space-between; padding:18px 20px}
+.brand{display:flex; align-items:center; gap:.55rem; font-weight:800; font-size:1.2rem; color:#fff;
+  font-family:"Bricolage Grotesque",var(--sans),sans-serif}
+.brand .mk{width:11px; height:11px; border-radius:4px; background:var(--cyan)}
+header.top a{color:#B9CBE4} header.top a:hover{color:#fff; text-decoration:none}
+
+main{padding:40px 0 20px}
+h1{font-family:"Bricolage Grotesque",sans-serif; font-size:2rem; line-height:1.1; margin:0 0 4px}
+.atualizado{color:var(--muted); font-size:.9rem; margin:0 0 28px}
+h2{font-family:"Bricolage Grotesque",sans-serif; font-size:1.28rem; margin:34px 0 10px}
+h3{font-size:1.05rem; margin:20px 0 6px}
+p,li{margin:0 0 12px}
+ul{padding-left:22px; margin:0 0 12px}
+
+.preencher{background:#FFF3C4; border:1px solid #E7C200; border-radius:4px;
+  padding:0 5px; font-weight:600; color:#7a5c00; white-space:nowrap}
+.aviso{background:#FFF8E1; border:1px solid #F0D48A; border-radius:10px;
+  padding:14px 16px; font-size:.96rem; color:#6b5300; margin:22px 0}
+
+footer{background:var(--navy); color:#9FB4D2; font-size:.9rem; padding:30px 0; margin-top:44px}
+footer .wrap{display:flex; flex-wrap:wrap; gap:14px 30px; justify-content:space-between; align-items:flex-start}
+.ident{line-height:1.6}
+.ident strong{color:#EAF2FB}
+footer a{color:#9FB4D2} footer a:hover{color:#fff}
+.legal-nav{display:flex; flex-wrap:wrap; gap:.4rem .9rem}
+
+@media(max-width:560px){.wrap{padding:0 16px} h1{font-size:1.6rem}}
