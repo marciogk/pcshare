@@ -17,3 +17,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 # glow (OpenGL), não wgpu: a máquina de dev tem Intel HD 4600, GPU antiga em
 # que o caminho OpenGL é o mais compatível. Ver [[pcshare-restricoes-maquina-dev]].
 eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts"] }
+
+[build-dependencies]
+# Embute o ícone do PCShare no .exe (Explorer, barra de tarefas, download).
+winresource = "0.1"
