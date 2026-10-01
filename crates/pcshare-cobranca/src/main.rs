@@ -285,9 +285,15 @@ fn enviar_email(
          <p style=\"font-size:22px;font-weight:bold;letter-spacing:2px;background:#F3F7FC;\
          border:1px solid #DBE6F3;border-radius:8px;padding:14px 18px;text-align:center\">{chave}</p>\
          <p>Válida até <b>{validade}</b>.</p>\
-         <p><b>Como ativar:</b> abra o PCShare, vá em <b>Configurações</b>, cole a chave e conecte.</p>\
+         <p><b>Como ativar, em 3 passos:</b></p>\
+         <ol style=\"line-height:1.7\">\
+         <li>Baixe o PCShare: <a href=\"https://www.pcshare.com.br/baixar/PCShare.exe\">pcshare.com.br/baixar/PCShare.exe</a><br>\
+         <span style=\"color:#5A7291;font-size:13px\">Se o Windows avisar que o editor é desconhecido, clique em <b>Mais informações &rarr; Executar assim mesmo</b>.</span></li>\
+         <li>Abra o PCShare e vá em <b>Configurações</b>.</li>\
+         <li>Cole a chave acima, salve e conecte.</li>\
+         </ol>\
          <p style=\"color:#5A7291;font-size:13px;margin-top:24px\">PCShare — acesso remoto por ID. \
-         Este e-mail é automático; não responda.</p></div>"
+         Este e-mail é automático; não responda. Dúvidas: contato@pcshare.com.br</p></div>"
     );
     let corpo = serde_json::json!({
         "sender": { "name": cfg.email_de_nome, "email": cfg.email_de },
