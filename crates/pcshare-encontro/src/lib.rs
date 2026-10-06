@@ -343,13 +343,13 @@ pub fn conectar_por_id(
         Mensagem::LicencaInvalida => {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "licença inválida — verifique a chave da sua assinatura",
+                "licença inválida — confira a chave em Configurações, ou assine em pcshare.com.br",
             ));
         }
         Mensagem::LicencaExpirada => {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "assinatura expirada — renove para continuar acessando",
+                "licença expirada — assine (ou renove) em pcshare.com.br para continuar",
             ));
         }
         outra => {
