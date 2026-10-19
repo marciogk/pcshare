@@ -1179,6 +1179,17 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
     let mut refinado = false;
     const REFINAR_APOS: Duration = Duration::from_millis(250);
 
+    // Polimento depois do keyframe. Um keyframe recodifica a tela INTEIRA com o
+    // orçamento de um quadro só, e em tela de texto ele sai borrado — inclusive
+    // nas áreas que não mudaram. O encoder corrige isso sozinho nos quadros
+    // seguintes (é o "refinar qualidade" da etapa 2), mas a supressão da tela
+    // parada cortava esses quadros: o keyframe mole ficava congelado na tela do
+    // viewer até alguém mexer em algo. Visto em uso real em 16/10/2026 (tela toda
+    // borrada, explorer e editor juntos). Agora, após cada keyframe, seguimos
+    // codificando a tela parada por mais POLIMENTO quadros (~meio segundo).
+    let mut polimento = 0u32;
+    const POLIMENTO: u32 = 30;
+
     loop {
         // ---- mensagens vindas do viewer
         while let Some((channel, payload)) = t.poll()? {
@@ -1312,9 +1323,10 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
                 keyframe_pendente = true;
                 refinado = true;
             }
-            // Sem keyframe a enviar, suprime (economia na tela imóvel). Com um
-            // pendente, cai no encode NORMAL abaixo (seguro, um submit por volta).
-            if !keyframe_pendente {
+            // Sem keyframe a enviar nem polimento em curso, suprime (economia na
+            // tela imóvel). Senão cai no encode NORMAL abaixo (seguro, um submit
+            // por volta).
+            if !keyframe_pendente && polimento == 0 {
                 stats.skipped += 1;
                 t.flush()?;
                 continue;
@@ -1352,6 +1364,11 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
 
         last_encoded = Instant::now();
         let captured_us = now_us();
+        // Conta só os quadros de polimento de verdade (tela parada, keyframe já
+        // saído); quadros com mudança refinam por conta própria.
+        if !frame.has_changes() && !keyframe_pendente {
+            polimento = polimento.saturating_sub(1);
+        }
 
         if let Some(conv) = conv.as_mut() {
             // Caminho sem cópia: a textura nunca sai da memória de vídeo.
@@ -1415,6 +1432,7 @@ fn run_host<T: Transport>(mut t: T) -> Result<(), Box<dyn std::error::Error>> {
             // suprimir a tela parada.
             if ehkeyframe {
                 keyframe_pendente = false;
+                polimento = POLIMENTO;
             }
         }
         t.flush()?;

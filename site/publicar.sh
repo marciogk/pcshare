@@ -6,7 +6,7 @@
 #
 #     ./site/publicar.sh
 #
-# Faz, nesta ordem: recompila o Agente em release, monta o pacote em
+# Faz, nesta ordem: recompila o Agente e o PCShare em release, monta o pacote em
 # `site/baixar/`, envia a pasta `site/` inteira por scp, confere a configuração
 # do nginx, recarrega e verifica o que subiu.
 #
@@ -37,15 +37,19 @@ SSH_ARGS=(-o BatchMode=yes)
 [ -n "$SSH_CHAVE" ] && SSH_ARGS+=(-i "$SSH_CHAVE")
 alvo="$VPS_USER@$VPS_HOST"
 
-echo "==> 1/5  recompilando o Agente em release"
-cargo build --release -p pcshare-agente
+echo "==> 1/5  recompilando o Agente e o PCShare em release"
+cargo build --release -p pcshare-agente -p pcshare-ui
 
 echo "==> 2/5  montando site/baixar/"
 mkdir -p site/baixar
 cp target/release/pcshare-agente.exe site/baixar/PCShare-Agente.exe
+cp target/release/pcshare.exe site/baixar/PCShare.exe
 sha_local="$(sha256sum site/baixar/PCShare-Agente.exe | cut -d' ' -f1)"
 bytes_local="$(stat -c%s site/baixar/PCShare-Agente.exe)"
 echo "    PCShare-Agente.exe  $bytes_local bytes  sha256 ${sha_local:0:16}…"
+sha_local_ui="$(sha256sum site/baixar/PCShare.exe | cut -d' ' -f1)"
+bytes_local_ui="$(stat -c%s site/baixar/PCShare.exe)"
+echo "    PCShare.exe         $bytes_local_ui bytes  sha256 ${sha_local_ui:0:16}…"
 
 echo "==> 3/5  enviando para $alvo:$VPS_RAIZ"
 # scp não tem --exclude; monto uma cópia sem este script e mando ela
@@ -83,6 +87,13 @@ else
     echo "    !! o .exe baixado NÃO confere com o local"
     echo "       local:  $sha_local"
     echo "       remoto: $sha_remoto"
+    exit 1
+fi
+sha_remoto_ui="$("${CURL[@]}" "$BASE/baixar/PCShare.exe" | sha256sum | cut -d' ' -f1)"
+if [ "$sha_remoto_ui" = "$sha_local_ui" ]; then
+    echo "    PCShare.exe confere: sha256 idêntico ao binário local"
+else
+    echo "    !! o PCShare.exe baixado NÃO confere com o local"
     exit 1
 fi
 
